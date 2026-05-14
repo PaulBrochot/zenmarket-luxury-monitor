@@ -1,7 +1,7 @@
 """
 monitor.py — Buyee Mercari → ZenMarket Luxury Monitor
 
-Source  : buyee.jp/mercari (section Mercari = achat immédiat uniquement)
+Source  : buyee.jp (section Mercari via ?shop=mercari = achat immédiat uniquement)
 Alertes : Discord embed avec lien ZenMarket + lien Buyee
 """
 
@@ -59,21 +59,21 @@ EXCLUDE_KEYWORDS = [
 
 def build_search_urls() -> list[tuple[str, str]]:
     """
-    Buyee Mercari section : buyee.jp/item/search/mercari/query/KEYWORD?sort=created_time&order=desc
-    Tous les articles Mercari sont à prix fixe (achat immédiat), pas d'enchères.
+    Buyee Mercari : buyee.jp/item/search/query/KEYWORD?shop=mercari&sort=created_time&order=desc
+    shop=mercari filtre uniquement les articles Mercari Japan (achat immédiat).
     """
     urls = []
     primary_kw = ["バッグ", "ハンドバッグ", "ショルダーバッグ", "ポシェット"]
     for brand_en, brand_jp in BRAND_MAPPING.items():
         for kw in primary_kw:
             query = requests.utils.quote(f"{brand_jp} {kw}")
-            url = f"https://buyee.jp/item/search/mercari/query/{query}?sort=created_time&order=desc"
+            url = f"https://buyee.jp/item/search/query/{query}?shop=mercari&sort=created_time&order=desc"
             urls.append((brand_en, url))
     return urls
 
 
 def item_to_zenmarket_url(item_id: str) -> str:
-    """Lien ZenMarket pour un article Mercari Japan."""
+    """Lien ZenMarket pour un article Mercari Japan (format mercari.aspx)."""
     return f"https://zenmarket.jp/en/mercari.aspx?itemCode={item_id}"
 
 
@@ -104,27 +104,22 @@ def parse_listings(html: str, brand: str) -> list[dict]:
     soup  = BeautifulSoup(html, "lxml")
     items = []
 
-    # Buyee Mercari : cartes dans ul.items__body > li, ou div.itemCard
-    cards = soup.select("ul.items__body li") or \
+    cards = soup.select("div.g-thumbnail__outer") or \
             soup.select("div.itemCard") or \
             soup.select("[class*='itemCard']") or \
             soup.select("li.item")
 
     for card in cards:
         try:
-            # ── Titre
-            title = ""
-            img = card.select_one("img[data-src], img[src]")
-            if img:
-                title = str(img.get("alt", "")).strip()
+            img   = card.select_one("img[data-src], img[src]")
+            title = str(img.get("alt", "")).strip() if img else ""
             if not title:
-                a = card.select_one("a[href]")
+                a     = card.select_one("a[href]")
                 title = a.get_text(strip=True) if a else ""
             if len(title) < 8:
                 continue
 
             title_lower = title.lower()
-
             if not (any(kw in title for kw in KEYWORDS_JP) or
                     any(kw in title_lower for kw in KEYWORDS_EN)):
                 continue
@@ -132,16 +127,15 @@ def parse_listings(html: str, brand: str) -> list[dict]:
                any(kw in title_lower for kw in EXCLUDE_KEYWORDS):
                 continue
 
-            # ── Lien et ID Mercari (format mXXXXXXXX)
+            # ── Lien et ID Mercari (commence par 'm')
             link_tag     = card.select_one("a[href*='/item/mercari/']")
             if not link_tag:
                 link_tag = card.select_one("a[href]")
             item_url_raw = str(link_tag.get("href", "")) if link_tag else ""
 
-            # ID Mercari commence par 'm'
-            m = re.search(r"/item/mercari/[^/]+/(m[A-Za-z0-9]+)", item_url_raw)
+            m = re.search(r"/(m[0-9]{9,})", item_url_raw)
             if not m:
-                m = re.search(r"/(m[0-9]{9,})", item_url_raw)
+                m = re.search(r"/item/mercari/[^/]+/(m[A-Za-z0-9]+)", item_url_raw)
             item_id = m.group(1) if m else ""
             if not item_id:
                 continue
@@ -152,16 +146,17 @@ def parse_listings(html: str, brand: str) -> list[dict]:
 
             # ── Prix
             price_jpy = 0
+            parent    = card.parent or card
             price_tag = (
-                card.select_one(".g-price") or
-                card.select_one("[class*='price']") or
-                card.select_one("[class*='Price']")
+                parent.select_one(".g-price") or
+                parent.select_one("[class*='price']") or
+                parent.select_one("[class*='Price']")
             )
             if price_tag:
                 digits    = re.sub(r"[^\d]", "", price_tag.get_text())
                 price_jpy = int(digits) if digits else 0
 
-            # ── Image (data-src = lazy-load Buyee)
+            # ── Image (data-src = lazy-load)
             image_url = ""
             if img:
                 src = str(img.get("data-src") or img.get("src", ""))
@@ -186,7 +181,6 @@ def parse_listings(html: str, brand: str) -> list[dict]:
     return items
 
 
-# ─── Taux de change ───────────────────────────────────────────────────────────
 _rate_cache: dict = {}
 
 def get_jpy_eur_rate() -> float:
@@ -208,7 +202,6 @@ def jpy_to_eur(jpy: int) -> float:
     return round(jpy * get_jpy_eur_rate(), 2)
 
 
-# ─── Discord ──────────────────────────────────────────────────────────────────
 BRAND_COLORS = {
     "Louis Vuitton": 0xC49A3A,
     "Prada":         0x1A1A1A,
@@ -267,7 +260,6 @@ def send_discord_alert(item: dict) -> bool:
         return False
 
 
-# ─── Boucle principale ────────────────────────────────────────────────────────
 def run():
     log.info("🚀 Démarrage — Buyee Mercari (achat immédiat) → Discord")
     conn        = init_db(DB_PATH)
