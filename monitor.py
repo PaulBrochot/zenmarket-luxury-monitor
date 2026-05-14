@@ -61,16 +61,11 @@ EXCLUDE_KEYWORDS = [
 
 
 def build_search_urls() -> list[tuple[str, str]]:
-    """
-    buynow=1 : filtre côté Buyee pour n'afficher QUE les achats immédiats.
-    Les enchères classiques sont exclues dès la requête, pas de post-traitement nécessaire.
-    """
     urls = []
     primary_kw = ["バッグ", "ハンドバッグ", "ショルダーバッグ", "ポシェット"]
     for brand_en, brand_jp in BRAND_MAPPING.items():
         for kw in primary_kw:
             query = requests.utils.quote(f"{brand_jp} {kw}")
-            # buynow=1 = achat immédiat uniquement (pas d'enchères)
             url = f"https://buyee.jp/item/search/query/{query}?page=1&sort=new&order=d&buynow=1"
             urls.append((brand_en, url))
     return urls
@@ -107,24 +102,26 @@ def parse_listings(html: str, brand: str) -> list[dict]:
     soup = BeautifulSoup(html, "lxml")
     items = []
 
-    cards = soup.select("div.itemCard")
+    # Buyee utilise class 'g-thumbnail__outer' comme wrapper de carte
+    cards = soup.select("div.g-thumbnail__outer")
     if not cards:
-        cards = soup.select("[class*='itemCard'], [class*='item-card'], [class*='g-item']")
+        cards = soup.select("[class*='itemCard'], [class*='item-card']")
     if not cards:
         cards = soup.select("li.item, div.item")
 
     for card in cards:
         try:
-            title_tag = (
-                card.select_one(".itemCard__itemName a") or
-                card.select_one(".itemCard__itemName") or
-                card.select_one("[class*='itemName'] a") or
-                card.select_one("[class*='name']") or
-                card.select_one("a")
-            )
-            if not title_tag:
-                continue
-            title = title_tag.get_text(strip=True)
+            # ── Titre via attribut alt de l'image (fiable sur Buyee)
+            img = card.select_one("img.lazyLoadV2, img[data-src]")
+            title = ""
+            if img and img.get("alt"):
+                title = img["alt"].strip()
+
+            # Fallback : chercher un lien avec texte
+            if not title:
+                a = card.select_one("a[href]")
+                if a:
+                    title = a.get_text(strip=True)
             if len(title) < 8:
                 continue
 
@@ -138,12 +135,11 @@ def parse_listings(html: str, brand: str) -> list[dict]:
                any(kw in title_lower for kw in EXCLUDE_KEYWORDS):
                 continue
 
-            link_tag = card.select_one("a[href*='/item/yahoo/auction/'], a[href*='auction']")
-            if not link_tag:
-                link_tag = card.select_one("a[href]")
+            # ── Lien et ID
+            link_tag = card.select_one("a[href]")
             item_url_raw = str(link_tag.get("href", "")) if link_tag else ""
 
-            m = re.search(r"/item/yahoo/auction/([A-Za-z0-9]+)", item_url_raw)
+            m = re.search(r"/item/(?:yahoo|jdirectitems)/auction/([A-Za-z0-9]+)", item_url_raw)
             item_id = m.group(1) if m else ""
             if not item_id:
                 m = re.search(r"/([a-z]\d{8,})", item_url_raw)
@@ -155,24 +151,27 @@ def parse_listings(html: str, brand: str) -> list[dict]:
             buyee_url = (f"https://buyee.jp{item_url_raw}"
                          if item_url_raw.startswith("/") else item_url_raw)
 
+            # ── Image : lire data-src (lazy-load Buyee), supprimer les params de resize
+            image_url = ""
+            if img:
+                src = str(img.get("data-src") or img.get("src", ""))
+                if src and "spacer.gif" not in src:
+                    # Supprimer les query params de redimensionnement (?pri=l&w=300...)
+                    src = src.split("?")[0]
+                    image_url = src
+
+            # ── Prix JPY : chercher dans le parent élargi (card + siblings)
             price_jpy = 0
+            # Remonter au conteneur parent pour trouver le prix
+            parent = card.parent or card
             price_tag = (
-                card.select_one(".g-price") or
-                card.select_one(".itemCard__price") or
-                card.select_one("[class*='price']") or
-                card.select_one("[class*='Price']")
+                parent.select_one(".g-price") or
+                parent.select_one("[class*='price']") or
+                parent.select_one("[class*='Price']")
             )
             if price_tag:
                 digits = re.sub(r"[^\d]", "", price_tag.get_text())
                 price_jpy = int(digits) if digits else 0
-
-            image_url = ""
-            img = card.select_one("img[src], img[data-src]")
-            if img:
-                src = str(img.get("src") or img.get("data-src", ""))
-                src = re.sub(r"_\d+\.jpg", "_500.jpg", src)
-                src = re.sub(r"\?.*$", "", src)
-                image_url = src if src.startswith("http") else f"https://buyee.jp{src}"
 
             items.append({
                 "id":        item_id,
