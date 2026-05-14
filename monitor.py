@@ -1,7 +1,7 @@
 """
 monitor.py — Buyee Mercari → ZenMarket Luxury Monitor
 
-Source  : buyee.jp/mercari/search (section Mercari = achat immédiat uniquement)
+Source  : buyee.jp/mercari/search (achat immédiat uniquement)
 Alertes : Discord embed avec lien ZenMarket (mercari.aspx) + lien Buyee
 """
 
@@ -17,9 +17,9 @@ from db import init_db, is_seen, mark_seen
 
 load_dotenv()
 
-WEBHOOK_URL    = os.getenv("DISCORD_WEBHOOK_URL", "")
-RATE_API_BASE  = os.getenv("RATE_API_BASE", "https://api.frankfurter.app")
-DB_PATH        = os.getenv("DB_PATH", "data/seen_items.db")
+WEBHOOK_URL     = os.getenv("DISCORD_WEBHOOK_URL", "")
+RATE_API_BASE   = os.getenv("RATE_API_BASE", "https://api.frankfurter.app")
+DB_PATH         = os.getenv("DB_PATH", "data/seen_items.db")
 CHECK_INTERVAL = (int(os.getenv("CHECK_MIN", "120")), int(os.getenv("CHECK_MAX", "300")))
 
 logging.basicConfig(
@@ -50,18 +50,40 @@ KEYWORDS_JP = [
 ]
 KEYWORDS_EN = [
     "bag", "pochette", "tote", "clutch", "leather", "purse", "handbag", "wallet",
+    "speedy", "neverfull", "alma", "keepall", "vuitton", "louis", "lv",
 ]
 EXCLUDE_KEYWORDS = [
     "空笱", "空き笱", "ショップ袋", "紙袋", "保存袋", "ダストバッグ", "保存箱",
     "dustbag", "dust bag", "empty box", "shopping bag only",
 ]
 
+# Session partagée pour maintenir les cookies
+_session = requests.Session()
+_session_init = False
+
+
+def init_session() -> None:
+    """Visite la page d'accueil Buyee pour obtenir les cookies de session."""
+    global _session_init
+    if _session_init:
+        return
+    try:
+        headers = {
+            "User-Agent":      random.choice(USER_AGENTS),
+            "Accept-Language": "ja,en-US;q=0.8,en;q=0.6",
+            "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Encoding": "gzip, deflate, br",
+        }
+        _session.headers.update(headers)
+        _session.get("https://buyee.jp/mercari/", timeout=15)
+        _session_init = True
+        log.info("Session Buyee initialisée")
+        time.sleep(random.uniform(1, 3))
+    except Exception as e:
+        log.warning(f"Init session : {e}")
+
 
 def build_search_urls() -> list[tuple[str, str]]:
-    """
-    Section Mercari de Buyee : buyee.jp/mercari/search?keyword=KEYWORD&sort=created_time&order=desc
-    Tous les articles sont à prix fixe (achat immédiat), zéro enchère.
-    """
     urls = []
     primary_kw = ["バッグ", "ハンドバッグ", "ショルダーバッグ", "ポシェット"]
     for brand_en, brand_jp in BRAND_MAPPING.items():
@@ -77,6 +99,7 @@ def item_to_zenmarket_url(item_id: str) -> str:
 
 
 def fetch_page(url: str) -> str | None:
+    init_session()
     headers = {
         "User-Agent":      random.choice(USER_AGENTS),
         "Accept-Language": "ja,en-US;q=0.8,en;q=0.6",
@@ -87,7 +110,7 @@ def fetch_page(url: str) -> str | None:
         "Connection":      "keep-alive",
     }
     try:
-        resp = requests.get(url, headers=headers, timeout=20)
+        resp = _session.get(url, headers=headers, timeout=20)
         resp.encoding = "utf-8"
         if resp.status_code == 200:
             log.info(f"HTML récupéré : {len(resp.text)} caractères")
@@ -103,59 +126,60 @@ def parse_listings(html: str, brand: str) -> list[dict]:
     soup  = BeautifulSoup(html, "lxml")
     items = []
 
-    # Buyee Mercari : li dans ul.items__body, ou div.itemCard
-    cards = soup.select("ul.items__body li") or \
-            soup.select("div.g-thumbnail__outer") or \
-            soup.select("div.itemCard") or \
-            soup.select("[class*='itemCard']")
+    # Buyee Mercari : liens directs vers /mercari/item/ID
+    links = soup.select("a[href*='/mercari/item/']") or \
+            soup.select("a[href*='conversionType=Mercari']")
 
-    for card in cards:
+    seen_ids = set()
+    for link in links:
         try:
-            img   = card.select_one("img[data-src], img[src]")
-            title = str(img.get("alt", "")).strip() if img else ""
-            if not title:
-                a     = card.select_one("a[href]")
-                title = a.get_text(strip=True) if a else ""
-            if len(title) < 8:
+            href = str(link.get("href", ""))
+
+            # Extraire l'ID : tout ce qui suit /mercari/item/
+            m = re.search(r"/mercari/item/([A-Za-z0-9]+)", href)
+            if not m:
+                continue
+            item_id = m.group(1)
+            if item_id in seen_ids:
+                continue
+            seen_ids.add(item_id)
+
+            # Titre : texte du lien, nettoyé
+            title = link.get_text(separator=" ", strip=True)
+            # Supprimer le badge "Avec Authentification" du début
+            title = re.sub(r"^(Avec Authentification|SALE)\s*", "", title).strip()
+            if len(title) < 5:
                 continue
 
             title_lower = title.lower()
-            if not (any(kw in title for kw in KEYWORDS_JP) or
-                    any(kw in title_lower for kw in KEYWORDS_EN)):
-                continue
+
+            # Filtre contenu maroquinerie (le mot de recherche est déjà la marque)
+            # On accepte tout article de la recherche de marque
             if any(kw in title for kw in EXCLUDE_KEYWORDS) or \
                any(kw in title_lower for kw in EXCLUDE_KEYWORDS):
                 continue
 
-            # ── Lien et ID Mercari (m + 9 chiffres)
-            link_tag     = card.select_one("a[href*='/mercari/item/']")
-            if not link_tag:
-                link_tag = card.select_one("a[href]")
-            item_url_raw = str(link_tag.get("href", "")) if link_tag else ""
-
-            m = re.search(r"/(m[0-9]{9,})", item_url_raw)
-            item_id = m.group(1) if m else ""
-            if not item_id:
-                continue
-
             zenmarket_url = item_to_zenmarket_url(item_id)
-            buyee_url = (f"https://buyee.jp{item_url_raw}"
-                         if item_url_raw.startswith("/") else item_url_raw)
+            buyee_url = (f"https://buyee.jp{href}" if href.startswith("/") else href)
+            # Nettoyer le param de tracking
+            buyee_url = buyee_url.split("?")[0]
 
-            # ── Prix
+            # Prix : chercher dans le parent
             price_jpy = 0
-            parent    = card.parent or card
-            price_tag = (
-                parent.select_one(".g-price") or
-                card.select_one(".g-price") or
-                card.select_one("[class*='price']")
-            )
-            if price_tag:
-                digits    = re.sub(r"[^\d]", "", price_tag.get_text())
-                price_jpy = int(digits) if digits else 0
+            parent = link.parent
+            for _ in range(4):  # Remonter jusqu'à 4 niveaux
+                if parent is None:
+                    break
+                price_tag = parent.find(string=re.compile(r"[\d,]+\s*YENS?"))
+                if price_tag:
+                    digits    = re.sub(r"[^\d]", "", str(price_tag))
+                    price_jpy = int(digits) if digits else 0
+                    break
+                parent = parent.parent
 
-            # ── Image (data-src = lazy-load)
+            # Image
             image_url = ""
+            img = link.find("img")
             if img:
                 src = str(img.get("data-src") or img.get("src", ""))
                 if src and "spacer.gif" not in src and "noimage" not in src:
@@ -172,10 +196,10 @@ def parse_listings(html: str, brand: str) -> list[dict]:
             })
 
         except Exception as e:
-            log.debug(f"Erreur parsing card : {e}")
+            log.debug(f"Erreur parsing link : {e}")
             continue
 
-    log.info(f"  → {len(items)} annonce(s) maroquinerie pour {brand}")
+    log.info(f"  → {len(items)} annonce(s) pour {brand}")
     return items
 
 
@@ -231,7 +255,7 @@ def send_discord_alert(item: dict) -> bool:
             {"name": "💶 Prix EUR (est.)", "value": f"€ {price_eur:,.2f}"        if item['price_jpy'] else "N/A", "inline": True},
             {"name": "👜 Marque",          "value": brand,                                                       "inline": True},
         ],
-        "footer":    {"text": "Mercari Japan via Buyee • Achat immédiat • ZenMarket pour commander • JPY/EUR temps réel"},
+        "footer":    {"text": "Mercari Japan via Buyee • Achat immédiat • ZenMarket pour commander"},
         "timestamp": __import__("datetime").datetime.utcnow().isoformat() + "Z",
     }
 
