@@ -1,8 +1,8 @@
 """
 monitor.py — Buyee Mercari → ZenMarket Luxury Monitor
 
-Source  : buyee.jp (section Mercari via ?shop=mercari = achat immédiat uniquement)
-Alertes : Discord embed avec lien ZenMarket + lien Buyee
+Source  : buyee.jp/mercari/search (section Mercari = achat immédiat uniquement)
+Alertes : Discord embed avec lien ZenMarket (mercari.aspx) + lien Buyee
 """
 
 import os
@@ -59,21 +59,20 @@ EXCLUDE_KEYWORDS = [
 
 def build_search_urls() -> list[tuple[str, str]]:
     """
-    Buyee Mercari : buyee.jp/item/search/query/KEYWORD?shop=mercari&sort=created_time&order=desc
-    shop=mercari filtre uniquement les articles Mercari Japan (achat immédiat).
+    Section Mercari de Buyee : buyee.jp/mercari/search?keyword=KEYWORD&sort=created_time&order=desc
+    Tous les articles sont à prix fixe (achat immédiat), zéro enchère.
     """
     urls = []
     primary_kw = ["バッグ", "ハンドバッグ", "ショルダーバッグ", "ポシェット"]
     for brand_en, brand_jp in BRAND_MAPPING.items():
         for kw in primary_kw:
-            query = requests.utils.quote(f"{brand_jp} {kw}")
-            url = f"https://buyee.jp/item/search/query/{query}?shop=mercari&sort=created_time&order=desc"
+            keyword = requests.utils.quote(f"{brand_jp} {kw}")
+            url = f"https://buyee.jp/mercari/search?keyword={keyword}&sort=created_time&order=desc"
             urls.append((brand_en, url))
     return urls
 
 
 def item_to_zenmarket_url(item_id: str) -> str:
-    """Lien ZenMarket pour un article Mercari Japan (format mercari.aspx)."""
     return f"https://zenmarket.jp/en/mercari.aspx?itemCode={item_id}"
 
 
@@ -83,7 +82,7 @@ def fetch_page(url: str) -> str | None:
         "Accept-Language": "ja,en-US;q=0.8,en;q=0.6",
         "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Encoding": "gzip, deflate, br",
-        "Referer":         "https://buyee.jp/",
+        "Referer":         "https://buyee.jp/mercari/",
         "DNT":             "1",
         "Connection":      "keep-alive",
     }
@@ -104,10 +103,11 @@ def parse_listings(html: str, brand: str) -> list[dict]:
     soup  = BeautifulSoup(html, "lxml")
     items = []
 
-    cards = soup.select("div.g-thumbnail__outer") or \
+    # Buyee Mercari : li dans ul.items__body, ou div.itemCard
+    cards = soup.select("ul.items__body li") or \
+            soup.select("div.g-thumbnail__outer") or \
             soup.select("div.itemCard") or \
-            soup.select("[class*='itemCard']") or \
-            soup.select("li.item")
+            soup.select("[class*='itemCard']")
 
     for card in cards:
         try:
@@ -127,15 +127,13 @@ def parse_listings(html: str, brand: str) -> list[dict]:
                any(kw in title_lower for kw in EXCLUDE_KEYWORDS):
                 continue
 
-            # ── Lien et ID Mercari (commence par 'm')
-            link_tag     = card.select_one("a[href*='/item/mercari/']")
+            # ── Lien et ID Mercari (m + 9 chiffres)
+            link_tag     = card.select_one("a[href*='/mercari/item/']")
             if not link_tag:
                 link_tag = card.select_one("a[href]")
             item_url_raw = str(link_tag.get("href", "")) if link_tag else ""
 
             m = re.search(r"/(m[0-9]{9,})", item_url_raw)
-            if not m:
-                m = re.search(r"/item/mercari/[^/]+/(m[A-Za-z0-9]+)", item_url_raw)
             item_id = m.group(1) if m else ""
             if not item_id:
                 continue
@@ -149,8 +147,8 @@ def parse_listings(html: str, brand: str) -> list[dict]:
             parent    = card.parent or card
             price_tag = (
                 parent.select_one(".g-price") or
-                parent.select_one("[class*='price']") or
-                parent.select_one("[class*='Price']")
+                card.select_one(".g-price") or
+                card.select_one("[class*='price']")
             )
             if price_tag:
                 digits    = re.sub(r"[^\d]", "", price_tag.get_text())
