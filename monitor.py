@@ -1,11 +1,16 @@
 """
-monitor.py — Yahoo Auctions Japan → ZenMarket Luxury Monitor
+monitor.py — Buyee.jp → ZenMarket Luxury Monitor
 
-Source de données : auctions.yahoo.co.jp (HTML statique, requests suffisant)
+Source de données : buyee.jp (proxy Yahoo Auctions Japan, accessible depuis l'Europe)
 Alertes Discord  : lien ZenMarket pour enchérir directement
 
+Pourquoi Buyee ?
+  - Yahoo Auctions Japan bloque toute l'Europe depuis avril 2022
+  - Buyee est un proxy officiel Yahoo Auctions, mêmes annonces, HTML statique
+  - Accessible sans restriction depuis la France/Europe
+
 Fonctionnalités :
-  - Recherche en japonais sur Yahoo Auctions Japan
+  - Recherche en japonais sur Buyee (= Yahoo Auctions Japan)
   - Rotation User-Agent + jitter anti-ban
   - Conversion JPY→EUR via Frankfurter (gratuit, sans clé)
   - Déduplication via SQLite
@@ -25,10 +30,10 @@ from db import init_db, is_seen, mark_seen
 # ─── Environnement ────────────────────────────────────────────────────────────────
 load_dotenv()
 
-WEBHOOK_URL: str  = os.getenv("DISCORD_WEBHOOK_URL", "")
-RATE_API_BASE     = os.getenv("RATE_API_BASE", "https://api.frankfurter.app")
-DB_PATH           = os.getenv("DB_PATH", "data/seen_items.db")
-CHECK_INTERVAL   = (int(os.getenv("CHECK_MIN", "120")), int(os.getenv("CHECK_MAX", "300")))
+WEBHOOK_URL   = os.getenv("DISCORD_WEBHOOK_URL", "")
+RATE_API_BASE = os.getenv("RATE_API_BASE", "https://api.frankfurter.app")
+DB_PATH       = os.getenv("DB_PATH", "data/seen_items.db")
+CHECK_INTERVAL = (int(os.getenv("CHECK_MIN", "120")), int(os.getenv("CHECK_MAX", "300")))
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -36,7 +41,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[logging.StreamHandler()],
 )
-log = logging.getLogger("yahoo-monitor")
+log = logging.getLogger("buyee-monitor")
 
 # ─── User-Agents ───────────────────────────────────────────────────────────────
 USER_AGENTS = [
@@ -65,51 +70,45 @@ KEYWORDS_EN = [
     "bag", "pochette", "tote", "clutch", "leather", "purse", "handbag", "wallet",
 ]
 
-# ─── URLs de recherche Yahoo Auctions Japan ───────────────────────────────────────
-YAHOO_SEARCH = "https://auctions.yahoo.co.jp/search/search"
+# ─── URLs de recherche Buyee ────────────────────────────────────────────────────
+# Buyee = proxy officiel Yahoo Auctions Japan, accessible depuis l'Europe
+BUYEE_SEARCH = "https://buyee.jp/item/search/query"
 
 def build_search_urls() -> list[tuple[str, str]]:
     """
-    Génère les URLs de recherche Yahoo Auctions Japan.
-    Paramètres : p=mot-clé, ei=utf-8, auccat=0 (toutes catégories),
-    s1=new (tri par nouveauté pour capturer les nouvelles annonces en premier)
+    Génère les URLs de recherche Buyee.
+    Format : https://buyee.jp/item/search/query/{mot-clé}?page=1
+    Tri par date (sort=end) pour capturer les nouvelles annonces en premier.
     """
     urls = []
     primary_kw = ["バッグ", "ハンドバッグ", "ショルダーバッグ", "ポシェット"]
     for brand_en, brand_jp in BRAND_MAPPING.items():
         for kw in primary_kw:
-            query = f"{brand_jp} {kw}"
-            params = {
-                "p":      query,
-                "ei":     "utf-8",
-                "auccat": "0",
-                "s1":     "new",   # Tri par date (plus récent en premier)
-                "o1":     "d",
-            }
-            param_str = "&".join(f"{k}={requests.utils.quote(str(v))}" for k, v in params.items())
-            url = f"{YAHOO_SEARCH}?{param_str}"
+            query = requests.utils.quote(f"{brand_jp} {kw}")
+            url = f"{BUYEE_SEARCH}/{query}?page=1&sort=end&order=d"
             urls.append((brand_en, url))
     return urls
 
 
-def yahoo_item_to_zenmarket_url(item_id: str) -> str:
+def item_to_zenmarket_url(item_id: str) -> str:
     """Convertit un ID Yahoo Auctions en lien ZenMarket pour enchérir."""
     return f"https://zenmarket.jp/en/auction.aspx?itemCode={item_id}"
 
 
-# ─── HTTP fetch simple ─────────────────────────────────────────────────────────────
+# ─── HTTP fetch ────────────────────────────────────────────────────────────────
 def fetch_page(url: str) -> str | None:
     """
-    Yahoo Auctions Japan sert du HTML statique — requests suffit.
-    Rotation User-Agent + headers japonais pour maximiser les résultats.
+    Buyee sert du HTML statique — requests suffit.
+    Rotation User-Agent + headers pour éviter le blocage.
     """
     headers = {
         "User-Agent":      random.choice(USER_AGENTS),
-        "Accept-Language": "ja,en-US;q=0.8",
+        "Accept-Language": "ja,en-US;q=0.8,en;q=0.6",
         "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Encoding": "gzip, deflate, br",
-        "Referer":         "https://auctions.yahoo.co.jp/",
+        "Referer":         "https://buyee.jp/",
         "DNT":             "1",
+        "Connection":      "keep-alive",
     }
     try:
         resp = requests.get(url, headers=headers, timeout=20)
@@ -124,42 +123,45 @@ def fetch_page(url: str) -> str | None:
         return None
 
 
-# ─── Parsing Yahoo Auctions Japan ──────────────────────────────────────────────────
+# ─── Parsing Buyee ─────────────────────────────────────────────────────────────────
 def parse_listings(html: str, brand: str) -> list[dict]:
     """
-    Parse les résultats de recherche Yahoo Auctions Japan.
+    Parse les résultats de recherche Buyee.jp.
 
-    Structure HTML Yahoo Auctions (stable depuis des années) :
-      <li class="Product">                          ← carte article
-        <a class="Product__imageLink" href="...">   ← lien + ID
-          <img class="Product__image" src="...">    ← image
+    Structure HTML Buyee (stable) :
+      <div class="itemCard">
+        <a class="itemCard__itemPhoto" href="/item/yahoo/auction/ITEMID">
+          <img src="...">
         </a>
-        <h3 class="Product__title">...</h3>         ← titre
-        <span class="Product__price">               ← prix actuel
-          <span class="Product__priceValue">12,345</span>
-        </span>
-      </li>
+        <p class="itemCard__itemName">
+          <a href="...">Titre de l'article</a>
+        </p>
+        <p class="g-price">  ou  <span class="itemCard__price">
+          <span>12,345</span> JPY
+        </p>
+      </div>
     """
     soup = BeautifulSoup(html, "lxml")
     items = []
 
-    # Sélecteur principal Yahoo Auctions
-    cards = soup.select("li.Product")
+    # Sélecteurs principaux Buyee
+    cards = soup.select("div.itemCard")
     if not cards:
-        # Fallback si structure différente
-        cards = soup.select("li[class*='Product'], div[class*='Product'], .SearchResult li")
+        cards = soup.select("[class*='itemCard'], [class*='item-card'], [class*='g-item']")
     if not cards:
-        cards = soup.select("li")
+        # Fallback générique
+        cards = soup.select("li.item, div.item")
 
-    log.debug(f"{len(cards)} cartes brutes trouvées")
+    log.debug(f"{len(cards)} cartes brutes")
 
     for card in cards:
         try:
             # ── Titre
             title_tag = (
-                card.select_one(".Product__title") or
-                card.select_one("h3") or
-                card.select_one("[class*='title']") or
+                card.select_one(".itemCard__itemName a") or
+                card.select_one(".itemCard__itemName") or
+                card.select_one("[class*='itemName'] a") or
+                card.select_one("[class*='name']") or
                 card.select_one("a")
             )
             if not title_tag:
@@ -174,29 +176,32 @@ def parse_listings(html: str, brand: str) -> list[dict]:
                     any(kw in title_lower for kw in KEYWORDS_EN)):
                 continue
 
-            # ── Lien Yahoo + extraction ID
-            link_tag = card.select_one("a[href]")
-            yahoo_url = ""
-            item_id = ""
-            if link_tag:
-                yahoo_url = str(link_tag.get("href", ""))
-                # ID Yahoo format : lettre + chiffres ex: v1234567890
-                m = re.search(r"/([a-z]\d{9,})", yahoo_url)
-                if m:
-                    item_id = m.group(1)
+            # ── Lien et ID
+            link_tag = card.select_one("a[href*='/item/yahoo/auction/'], a[href*='auction']")
+            if not link_tag:
+                link_tag = card.select_one("a[href]")
+            item_url_raw = str(link_tag.get("href", "")) if link_tag else ""
+
+            # ID Yahoo depuis l'URL Buyee : /item/yahoo/auction/ITEMID
+            m = re.search(r"/item/yahoo/auction/([A-Za-z0-9]+)", item_url_raw)
+            item_id = m.group(1) if m else ""
             if not item_id:
-                item_id = card.get("data-auction-id") or card.get("id") or ""
+                m = re.search(r"/([a-z]\d{8,})", item_url_raw)
+                item_id = m.group(1) if m else ""
             if not item_id:
                 continue
 
-            # ── Lien ZenMarket (pour enchérir)
-            zenmarket_url = yahoo_item_to_zenmarket_url(item_id)
+            # Lien ZenMarket pour enchérir
+            zenmarket_url = item_to_zenmarket_url(item_id)
+            # Lien Buyee complet (pour référence)
+            buyee_url = (f"https://buyee.jp{item_url_raw}"
+                         if item_url_raw.startswith("/") else item_url_raw)
 
             # ── Prix JPY
             price_jpy = 0
             price_tag = (
-                card.select_one(".Product__priceValue") or
-                card.select_one(".Product__price") or
+                card.select_one(".g-price") or
+                card.select_one(".itemCard__price") or
                 card.select_one("[class*='price']") or
                 card.select_one("[class*='Price']")
             )
@@ -206,20 +211,20 @@ def parse_listings(html: str, brand: str) -> list[dict]:
 
             # ── Image
             image_url = ""
-            img = card.select_one(".Product__image, img[src]")
+            img = card.select_one("img[src], img[data-src]")
             if img:
                 src = str(img.get("src") or img.get("data-src", ""))
-                # Remplacer taille miniature par image plus grande
-                src = re.sub(r"_\d+\.jpg", "_500.jpg", src)  # Yahoo format: _90.jpg → _500.jpg
-                src = re.sub(r"Xs\.jpg$", "l.jpg", src)       # Autre format Yahoo
-                image_url = src
+                # Agrandir miniature Buyee : remplacer suffixe de taille
+                src = re.sub(r"_\d+\.jpg", "_500.jpg", src)
+                src = re.sub(r"\?.*$", "", src)  # Supprimer query params
+                image_url = src if src.startswith("http") else f"https://buyee.jp{src}"
 
             items.append({
                 "id":        item_id,
                 "title":     title,
                 "price_jpy": price_jpy,
-                "url":       zenmarket_url,
-                "yahoo_url": yahoo_url,
+                "url":       zenmarket_url,   # Lien principal : ZenMarket
+                "buyee_url": buyee_url,        # Lien secondaire : Buyee
                 "image_url": image_url,
                 "brand":     brand,
             })
@@ -276,13 +281,17 @@ def send_discord_alert(item: dict) -> bool:
         "title":       item["title"][:256],
         "url":         item["url"],
         "color":       color,
-        "description": f"🏷️ Nouvelle annonce — **{brand}**\n[🛍️ Enchérir sur ZenMarket]({item['url']})",
+        "description": (
+            f"🏷️ Nouvelle annonce — **{brand}**\n"
+            f"[🛍️ Enchérir sur ZenMarket]({item['url']}) • "
+            f"[🔗 Voir sur Buyee]({item.get('buyee_url', item['url'])})"
+        ),
         "fields": [
             {"name": "💴 Prix JPY",       "value": f"¥ {item['price_jpy']:,}" if item['price_jpy'] else "N/A", "inline": True},
             {"name": "💶 Prix EUR (est.)", "value": f"€ {price_eur:,.2f}"        if item['price_jpy'] else "N/A", "inline": True},
             {"name": "👜 Marque",          "value": brand,                                                       "inline": True},
         ],
-        "footer":    {"text": "Yahoo Auctions Japan • via ZenMarket • JPY/EUR temps réel"},
+        "footer":    {"text": "Yahoo Auctions Japan via Buyee • Lien enchère : ZenMarket • JPY/EUR temps réel"},
         "timestamp": __import__("datetime").datetime.utcnow().isoformat() + "Z",
     }
 
@@ -311,7 +320,7 @@ def send_discord_alert(item: dict) -> bool:
 
 # ─── Boucle principale ────────────────────────────────────────────────────────────
 def run():
-    log.info("🚀 Démarrage — source : Yahoo Auctions Japan → liens ZenMarket")
+    log.info("🚀 Démarrage — source : Buyee.jp (Yahoo Auctions Japan) → liens ZenMarket")
     conn        = init_db(DB_PATH)
     search_urls = build_search_urls()
     log.info(f"{len(search_urls)} requêtes configurées")
@@ -340,7 +349,6 @@ def run():
                     new_items += 1
                 time.sleep(random.uniform(1, 3))
 
-            # Jitter entre chaque requête
             time.sleep(random.uniform(4, 10))
 
         log.info(f"Cycle #{cycle} — {new_items} alerte(s) envoyée(s)")
