@@ -150,46 +150,41 @@ def parse_listings(html: str, brand: str) -> list[dict]:
                 continue
             seen_ids.add(item_id)
 
-            # Titre : texte du lien, nettoyé
-            title = link.get_text(separator=" ", strip=True)
-            # Supprimer le badge "Avec Authentification" du début
+            # Titre via h2.name
+            title_tag = link.select_one("h2.name")
+            title = title_tag.get_text(strip=True) if title_tag else link.get_text(separator=" ", strip=True)
             title = re.sub(r"^(Avec Authentification|SALE)\s*", "", title).strip()
             if len(title) < 5:
                 continue
 
             title_lower = title.lower()
 
-            # Filtre contenu maroquinerie (le mot de recherche est déjà la marque)
-            # On accepte tout article de la recherche de marque
             if any(kw in title for kw in EXCLUDE_KEYWORDS) or \
                any(kw in title_lower for kw in EXCLUDE_KEYWORDS):
                 continue
 
             zenmarket_url = item_to_zenmarket_url(item_id)
             buyee_url = (f"https://buyee.jp{href}" if href.startswith("/") else href)
-            # Nettoyer le param de tracking
             buyee_url = buyee_url.split("?")[0]
 
-            # Prix : chercher dans le parent
+            # Prix via p.price
             price_jpy = 0
-            parent = link.parent
-            for _ in range(4):  # Remonter jusqu'à 4 niveaux
-                if parent is None:
-                    break
-                price_tag = parent.find(string=re.compile(r"[\d,]+\s*YENS?"))
-                if price_tag:
-                    digits    = re.sub(r"[^\d]", "", str(price_tag))
-                    price_jpy = int(digits) if digits else 0
-                    break
-                parent = parent.parent
+            price_tag = link.select_one("p.price")
+            if price_tag:
+                m_price = re.search(r"([\d,]+)円", price_tag.get_text())
+                if m_price:
+                    price_jpy = int(m_price.group(1).replace(",", ""))
 
-            # Image
+            # Image via data-bind lazyload
             image_url = ""
-            img = link.find("img")
+            img = link.select_one("img.thumbnail")
             if img:
-                src = str(img.get("data-src") or img.get("src", ""))
-                if src and "spacer.gif" not in src and "noimage" not in src:
-                    image_url = src.split("?")[0]
+                data_bind = img.get("data-bind", "")
+                m_img = re.search(r"imagePath:\s*'([^']+)'", data_bind)
+                if m_img:
+                    raw = m_img.group(1)
+                    image_url = ("https:" + raw) if raw.startswith("//") else raw
+                    image_url = image_url.split("?")[0]
 
             items.append({
                 "id":        item_id,
