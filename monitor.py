@@ -101,7 +101,7 @@ def build_search_urls() -> list[tuple[str, str]]:
 
 
 def item_to_zenmarket_url(item_id: str) -> str:
-    return f"https://zenmarket.jp/en/mercari.aspx?q={item_id}"
+    return f"https://zenmarket.jp/en/mercariproduct.aspx?itemCode={item_id}"
 
 
 def fetch_page(url: str) -> str | None:
@@ -249,7 +249,6 @@ def send_discord_alert(item: dict) -> bool:
         "description": (
             f"🏷️ Nouvelle annonce — **{brand}**\n"
             f"[🛍️ Acheter sur ZenMarket]({item['url']})  •  "
-            f"[🔗 Voir sur Buyee]({item.get('buyee_url', item['url'])})"
         ),
         "fields": [
             {"name": "💴 Prix JPY",       "value": f"¥ {item['price_jpy']:,}" if item['price_jpy'] else "N/A", "inline": True},
