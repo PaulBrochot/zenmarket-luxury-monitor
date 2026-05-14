@@ -58,8 +58,9 @@ EXCLUDE_KEYWORDS = [
 ]
 
 # Session partagée pour maintenir les cookies
-_session = requests.Session()
+_session      = requests.Session()
 _session_init = False
+_ua           = random.choice(USER_AGENTS)
 
 
 def init_session() -> None:
