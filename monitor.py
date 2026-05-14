@@ -15,7 +15,6 @@ from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from db import init_db, is_seen, mark_seen
 
-# ─── Environnement ────────────────────────────────────────────────────────────────
 load_dotenv()
 
 WEBHOOK_URL     = os.getenv("DISCORD_WEBHOOK_URL", "")
@@ -23,7 +22,6 @@ RATE_API_BASE   = os.getenv("RATE_API_BASE", "https://api.frankfurter.app")
 DB_PATH         = os.getenv("DB_PATH", "data/seen_items.db")
 CHECK_INTERVAL  = (int(os.getenv("CHECK_MIN", "120")), int(os.getenv("CHECK_MAX", "300")))
 
-# ─── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -31,7 +29,6 @@ logging.basicConfig(
 )
 log = logging.getLogger("buyee-monitor")
 
-# ─── User-Agents ───────────────────────────────────────────────────────────────
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
@@ -40,7 +37,6 @@ USER_AGENTS = [
     "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
 ]
 
-# ─── Marques ↔ Japonais ──────────────────────────────────────────────────────────
 BRAND_MAPPING = {
     "Louis Vuitton": "ルイ・ヴィトン",
     "Prada":         "プラダ",
@@ -49,7 +45,6 @@ BRAND_MAPPING = {
     "Hermès":        "エルメス",
 }
 
-# ─── Mots-clés maroquinerie (INCLURE) ─────────────────────────────────────────────
 KEYWORDS_JP = [
     "バッグ", "ハンドバッグ", "ショルダー", "ポシェット",
     "トートバッグ", "クラッチ", "財布", "レザー", "本革",
@@ -58,47 +53,27 @@ KEYWORDS_EN = [
     "bag", "pochette", "tote", "clutch", "leather", "purse", "handbag", "wallet",
 ]
 
-# ─── Mots-clés à EXCLURE (emballages, boîtes vides, sacs papier) ───────────────────
 EXCLUDE_KEYWORDS = [
-    "空笱",    # boîte vide
-    "空き笱",   # boîte vide (variante)
-    "ショップ袋",  # sac de boutique
-    "紙袋",    # sac en papier
-    "保存袋",   # sac de conservation
-    "ダストバッグ", # dust bag
-    "保存箱",   # boîte de conservation
-    "dustbag",
-    "dust bag",
-    "empty box",
-    "shopping bag only",
+    "空笱", "空き笱", "ショップ袋", "紙袋", "保存袋", "ダストバッグ", "保存箱",
+    "dustbag", "dust bag", "empty box", "shopping bag only",
 ]
 
-# ─── URLs de recherche Buyee ────────────────────────────────────────────────────
+
 def build_search_urls() -> list[tuple[str, str]]:
-    """
-    Génère les URLs de recherche Buyee triées par NOUVEAUTÉ.
-    sort=new : annonces les plus récentes en premier (nouvelles mises en ligne)
-    """
     urls = []
     primary_kw = ["バッグ", "ハンドバッグ", "ショルダーバッグ", "ポシェット"]
     for brand_en, brand_jp in BRAND_MAPPING.items():
         for kw in primary_kw:
             query = requests.utils.quote(f"{brand_jp} {kw}")
-            # sort=new = tri par date de mise en ligne (le plus récent en premier)
             url = f"https://buyee.jp/item/search/query/{query}?page=1&sort=new&order=d"
             urls.append((brand_en, url))
     return urls
 
 
 def item_to_zenmarket_url(item_id: str) -> str:
-    """
-    Convertit un ID Yahoo Auctions en lien ZenMarket valide.
-    Format correct : https://zenmarket.jp/en/yahoo/auction/ITEMID
-    """
     return f"https://zenmarket.jp/en/yahoo/auction/{item_id}"
 
 
-# ─── HTTP fetch ────────────────────────────────────────────────────────────────
 def fetch_page(url: str) -> str | None:
     headers = {
         "User-Agent":      random.choice(USER_AGENTS),
@@ -122,7 +97,6 @@ def fetch_page(url: str) -> str | None:
         return None
 
 
-# ─── Parsing Buyee ─────────────────────────────────────────────────────────────────
 def parse_listings(html: str, brand: str) -> list[dict]:
     soup = BeautifulSoup(html, "lxml")
     items = []
@@ -133,11 +107,8 @@ def parse_listings(html: str, brand: str) -> list[dict]:
     if not cards:
         cards = soup.select("li.item, div.item")
 
-    log.debug(f"{len(cards)} cartes brutes")
-
     for card in cards:
         try:
-            # ── Titre
             title_tag = (
                 card.select_one(".itemCard__itemName a") or
                 card.select_one(".itemCard__itemName") or
@@ -151,25 +122,23 @@ def parse_listings(html: str, brand: str) -> list[dict]:
             if len(title) < 8:
                 continue
 
-            # ── Filtre maroquinerie (INCLURE)
             title_lower = title.lower()
+
+            # Filtre inclusion maroquinerie
             if not (any(kw in title for kw in KEYWORDS_JP) or
                     any(kw in title_lower for kw in KEYWORDS_EN)):
                 continue
 
-            # ── Filtre EXCLURE (boîtes vides, sacs papier, etc.)
+            # Filtre exclusion (boîtes vides, etc.)
             if any(kw in title for kw in EXCLUDE_KEYWORDS) or \
                any(kw in title_lower for kw in EXCLUDE_KEYWORDS):
-                log.debug(f"Exclu : {title[:50]}")
                 continue
 
-            # ── Lien et ID Yahoo
             link_tag = card.select_one("a[href*='/item/yahoo/auction/'], a[href*='auction']")
             if not link_tag:
                 link_tag = card.select_one("a[href]")
             item_url_raw = str(link_tag.get("href", "")) if link_tag else ""
 
-            # Extraire l'ID Yahoo depuis /item/yahoo/auction/ITEMID
             m = re.search(r"/item/yahoo/auction/([A-Za-z0-9]+)", item_url_raw)
             item_id = m.group(1) if m else ""
             if not item_id:
@@ -178,13 +147,10 @@ def parse_listings(html: str, brand: str) -> list[dict]:
             if not item_id:
                 continue
 
-            # Lien ZenMarket (format correct)
             zenmarket_url = item_to_zenmarket_url(item_id)
-            # Lien Buyee
             buyee_url = (f"https://buyee.jp{item_url_raw}"
                          if item_url_raw.startswith("/") else item_url_raw)
 
-            # ── Prix JPY
             price_jpy = 0
             price_tag = (
                 card.select_one(".g-price") or
@@ -196,7 +162,6 @@ def parse_listings(html: str, brand: str) -> list[dict]:
                 digits = re.sub(r"[^\d]", "", price_tag.get_text())
                 price_jpy = int(digits) if digits else 0
 
-            # ── Image
             image_url = ""
             img = card.select_one("img[src], img[data-src]")
             if img:
@@ -223,7 +188,6 @@ def parse_listings(html: str, brand: str) -> list[dict]:
     return items
 
 
-# ─── Conversion JPY → EUR ─────────────────────────────────────────────────────
 _rate_cache: dict = {}
 
 def get_jpy_eur_rate() -> float:
@@ -245,7 +209,6 @@ def jpy_to_eur(jpy: int) -> float:
     return round(jpy * get_jpy_eur_rate(), 2)
 
 
-# ─── Discord Webhook ──────────────────────────────────────────────────────────
 BRAND_COLORS = {
     "Louis Vuitton": 0xC49A3A,
     "Prada":         0x1A1A1A,
@@ -300,11 +263,10 @@ def send_discord_alert(item: dict) -> bool:
         log.error(f"Discord HTTP {resp.status_code} : {resp.text}")
         return False
     except Exception as e:
-tml        log.error(f"Erreur Discord : {e}")
+        log.error(f"Erreur Discord : {e}")
         return False
 
 
-# ─── Boucle principale ────────────────────────────────────────────────────────────
 def run():
     log.info("🚀 Démarrage — Buyee.jp (Yahoo Auctions Japan) → Discord")
     log.info("⚠️  Premier lancement : les annonces existantes sont envoyées une seule fois")
