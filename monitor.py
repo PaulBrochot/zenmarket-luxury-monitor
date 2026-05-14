@@ -2,7 +2,8 @@
 monitor.py — Buyee.jp → ZenMarket Luxury Monitor
 
 Source  : buyee.jp (proxy Yahoo Auctions Japan, accessible depuis l'Europe)
-Alertes : Discord embed avec lien ZenMarket (enchère) + Buyee (voir annonce)
+Alertes : Discord embed avec lien ZenMarket (achat) + Buyee (voir annonce)
+Filtre  : achat immédiat uniquement (buynow=1), pas d'enchères
 """
 
 import os
@@ -60,21 +61,22 @@ EXCLUDE_KEYWORDS = [
 
 
 def build_search_urls() -> list[tuple[str, str]]:
+    """
+    buynow=1 : filtre côté Buyee pour n'afficher QUE les achats immédiats.
+    Les enchères classiques sont exclues dès la requête, pas de post-traitement nécessaire.
+    """
     urls = []
     primary_kw = ["バッグ", "ハンドバッグ", "ショルダーバッグ", "ポシェット"]
     for brand_en, brand_jp in BRAND_MAPPING.items():
         for kw in primary_kw:
             query = requests.utils.quote(f"{brand_jp} {kw}")
-            url = f"https://buyee.jp/item/search/query/{query}?page=1&sort=new&order=d"
+            # buynow=1 = achat immédiat uniquement (pas d'enchères)
+            url = f"https://buyee.jp/item/search/query/{query}?page=1&sort=new&order=d&buynow=1"
             urls.append((brand_en, url))
     return urls
 
 
 def item_to_zenmarket_url(item_id: str) -> str:
-    """
-    Format ZenMarket valide et fonctionnel :
-    https://zenmarket.jp/en/auction.aspx?itemCode=ITEMID
-    """
     return f"https://zenmarket.jp/en/auction.aspx?itemCode={item_id}"
 
 
@@ -234,7 +236,7 @@ def send_discord_alert(item: dict) -> bool:
         "color":       color,
         "description": (
             f"🏷️ Nouvelle annonce — **{brand}**\n"
-            f"[🛍️ Enchérir sur ZenMarket]({item['url']})  •  "
+            f"[🛍️ Acheter sur ZenMarket]({item['url']})  •  "
             f"[🔗 Voir sur Buyee]({item.get('buyee_url', item['url'])})"
         ),
         "fields": [
@@ -242,7 +244,7 @@ def send_discord_alert(item: dict) -> bool:
             {"name": "💶 Prix EUR (est.)", "value": f"€ {price_eur:,.2f}"        if item['price_jpy'] else "N/A", "inline": True},
             {"name": "👜 Marque",          "value": brand,                                                       "inline": True},
         ],
-        "footer":    {"text": "Yahoo Auctions Japan via Buyee • ZenMarket pour enchérir • JPY/EUR temps réel"},
+        "footer":    {"text": "Yahoo Auctions Japan via Buyee • Achat immédiat uniquement • JPY/EUR temps réel"},
         "timestamp": __import__("datetime").datetime.utcnow().isoformat() + "Z",
     }
 
@@ -270,9 +272,7 @@ def send_discord_alert(item: dict) -> bool:
 
 
 def run():
-    log.info("🚀 Démarrage — Buyee.jp (Yahoo Auctions Japan) → Discord")
-    log.info("⚠️  Premier lancement : les annonces existantes sont envoyées une seule fois")
-    log.info("ℹ️  Dès le 2e cycle, seules les NOUVELLES annonces seront notifiées")
+    log.info("🚀 Démarrage — Buyee.jp achat immédiat uniquement → Discord")
     conn        = init_db(DB_PATH)
     search_urls = build_search_urls()
     log.info(f"{len(search_urls)} requêtes configurées")
