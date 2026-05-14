@@ -1,0 +1,17 @@
+# ZenMarket Luxury Monitor — dépendances Python
+
+# HTTP client
+requests>=2.31.0
+
+# HTML parsing
+beautifulsoup4>=4.12.0
+lxml>=5.0.0           # Parser HTML plus rapide que html.parser
+
+# Navigateur headless (fallback anti-bot)
+playwright>=1.44.0
+
+# Variables d'environnement
+python-dotenv>=1.0.0
+
+# Optionnel : formatage avancé des logs
+# rich>=13.0.0

@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Variables d'environnement (contient votre token Discord !)
+.env
+
+# Base de données SQLite
+data/
+*.db
+*.sqlite
+
+# Playwright
+pw-browsers/
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
