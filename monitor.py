@@ -132,7 +132,6 @@ def parse_listings(html: str, brand: str) -> list[dict]:
     soup  = BeautifulSoup(html, "lxml")
     items = []
 
-    # Buyee Mercari : liens directs vers /mercari/item/ID
     links = soup.select("a[href*='/mercari/item/']") or \
             soup.select("a[href*='conversionType=Mercari']")
 
@@ -141,7 +140,6 @@ def parse_listings(html: str, brand: str) -> list[dict]:
         try:
             href = str(link.get("href", ""))
 
-            # Extraire l'ID : tout ce qui suit /mercari/item/
             m = re.search(r"/mercari/item/([A-Za-z0-9]+)", href)
             if not m:
                 continue
@@ -150,7 +148,6 @@ def parse_listings(html: str, brand: str) -> list[dict]:
                 continue
             seen_ids.add(item_id)
 
-            # Titre via h2.name
             title_tag = link.select_one("h2.name")
             title = title_tag.get_text(strip=True) if title_tag else link.get_text(separator=" ", strip=True)
             title = re.sub(r"^(Avec Authentification|SALE)\s*", "", title).strip()
@@ -167,7 +164,6 @@ def parse_listings(html: str, brand: str) -> list[dict]:
             buyee_url = (f"https://buyee.jp{href}" if href.startswith("/") else href)
             buyee_url = buyee_url.split("?")[0]
 
-            # Prix via p.price
             price_jpy = 0
             price_tag = link.select_one("p.price")
             if price_tag:
@@ -175,7 +171,6 @@ def parse_listings(html: str, brand: str) -> list[dict]:
                 if m_price:
                     price_jpy = int(m_price.group(1).replace(",", ""))
 
-            # Image via data-bind lazyload
             image_url = ""
             img = link.select_one("img.thumbnail")
             if img:
@@ -248,7 +243,7 @@ def send_discord_alert(item: dict) -> bool:
         "color":       color,
         "description": (
             f"🏷️ Nouvelle annonce — **{brand}**\n"
-            f"[🛍️ Acheter sur ZenMarket]({item['url']})  •  "
+            f"[🛍️ Acheter sur ZenMarket]({item['url']})"
         ),
         "fields": [
             {"name": "💴 Prix JPY",       "value": f"¥ {item['price_jpy']:,}" if item['price_jpy'] else "N/A", "inline": True},
@@ -256,7 +251,7 @@ def send_discord_alert(item: dict) -> bool:
             {"name": "👜 Marque",          "value": brand,                                                       "inline": True},
         ],
         "footer":    {"text": "Mercari Japan via Buyee • Achat immédiat • ZenMarket pour commander"},
-        "timestamp": __import__("datetime").datetime.utcnow().isoformat() + "Z",
+        "timestamp": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
     }
 
     if item.get("image_url"):
@@ -293,6 +288,10 @@ def run():
         cycle += 1
         log.info(f"── Cycle #{cycle} {'='*30}")
         new_items = 0
+        is_seed   = (cycle == 1)
+
+        if is_seed:
+            log.info("🌱 Cycle #1 : seed silencieux (marquage sans alerte)")
 
         for brand, url in search_urls:
             log.info(f"Scraping {brand}")
@@ -306,15 +305,23 @@ def run():
             for item in listings:
                 if is_seen(conn, item["id"]):
                     continue
-                sent = send_discord_alert(item)
-                if sent:
+                if is_seed:
+                    # Premier cycle : on marque sans envoyer sur Discord
                     mark_seen(conn, item["id"], item["title"], item["price_jpy"], brand)
-                    new_items += 1
-                time.sleep(random.uniform(0.5, 1.5))
+                else:
+                    sent = send_discord_alert(item)
+                    if sent:
+                        mark_seen(conn, item["id"], item["title"], item["price_jpy"], brand)
+                        new_items += 1
+                    time.sleep(random.uniform(0.5, 1.5))
 
             time.sleep(random.uniform(3, 7))
 
-        log.info(f"Cycle #{cycle} — {new_items} alerte(s) envoyée(s)")
+        if is_seed:
+            log.info(f"Cycle #1 seed terminé — items existants marqués, en attente de nouveaux…")
+        else:
+            log.info(f"Cycle #{cycle} — {new_items} alerte(s) envoyée(s)")
+
         wait = random.randint(*CHECK_INTERVAL)
         log.info(f"Prochain cycle dans {wait}s …")
         time.sleep(wait)
