@@ -63,24 +63,29 @@ _session_init = False
 
 
 def init_session() -> None:
-    """Visite la page d'accueil Buyee pour obtenir les cookies de session."""
     global _session_init
     if _session_init:
         return
+    headers = {
+        "User-Agent":      _ua,
+        "Accept-Language": "ja,en-US;q=0.8,en;q=0.6",
+        "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection":      "keep-alive",
+    }
+    _session.headers.update(headers)
     try:
-        headers = {
-            "User-Agent":      random.choice(USER_AGENTS),
-            "Accept-Language": "ja,en-US;q=0.8,en;q=0.6",
-            "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Encoding": "gzip, deflate, br",
-        }
-        _session.headers.update(headers)
-        _session.get("https://buyee.jp/mercari/", timeout=15)
+        r1 = _session.get("https://buyee.jp/", timeout=15)
+        log.info(f"Init step 1 (root) : {r1.status_code} / {len(r1.text)} chars")
+        time.sleep(random.uniform(1.5, 3))
+        r2 = _session.get("https://buyee.jp/mercari/", timeout=15,
+                          headers={"Referer": "https://buyee.jp/"})
+        log.info(f"Init step 2 (mercari) : {r2.status_code} / {len(r2.text)} chars")
+        time.sleep(random.uniform(1, 2))
         _session_init = True
-        log.info("Session Buyee initialisée")
-        time.sleep(random.uniform(1, 3))
+        log.info(f"Cookies : {list(_session.cookies.keys())}")
     except Exception as e:
-        log.warning(f"Init session : {e}")
+        log.warning(f"Init session erreur : {e}")
 
 
 def build_search_urls() -> list[tuple[str, str]]:
