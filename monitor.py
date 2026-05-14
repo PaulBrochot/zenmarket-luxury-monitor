@@ -71,7 +71,11 @@ def build_search_urls() -> list[tuple[str, str]]:
 
 
 def item_to_zenmarket_url(item_id: str) -> str:
-    return f"https://zenmarket.jp/en/yahoo/auction/{item_id}"
+    """
+    Format ZenMarket valide et fonctionnel :
+    https://zenmarket.jp/en/auction.aspx?itemCode=ITEMID
+    """
+    return f"https://zenmarket.jp/en/auction.aspx?itemCode={item_id}"
 
 
 def fetch_page(url: str) -> str | None:
@@ -124,12 +128,10 @@ def parse_listings(html: str, brand: str) -> list[dict]:
 
             title_lower = title.lower()
 
-            # Filtre inclusion maroquinerie
             if not (any(kw in title for kw in KEYWORDS_JP) or
                     any(kw in title_lower for kw in KEYWORDS_EN)):
                 continue
 
-            # Filtre exclusion (boîtes vides, etc.)
             if any(kw in title for kw in EXCLUDE_KEYWORDS) or \
                any(kw in title_lower for kw in EXCLUDE_KEYWORDS):
                 continue
