@@ -43,3 +43,18 @@ def mark_seen(
         (item_id, title, price_jpy, brand, datetime.utcnow().isoformat()),
     )
     conn.commit()
+
+def get_price(conn: sqlite3.Connection, item_id: str) -> int | None:
+    """Retourne le dernier prix connu d'un item, ou None si inconnu."""
+    cur = conn.execute("SELECT price_jpy FROM seen_items WHERE id = ?", (item_id,))
+    row = cur.fetchone()
+    return row[0] if row else None
+
+
+def update_price(conn: sqlite3.Connection, item_id: str, price_jpy: int) -> None:
+    """Met à jour le prix d'un item existant."""
+    conn.execute(
+        "UPDATE seen_items SET price_jpy = ? WHERE id = ?",
+        (price_jpy, item_id),
+    )
+    conn.commit()

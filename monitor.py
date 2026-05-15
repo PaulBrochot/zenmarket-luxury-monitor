@@ -12,7 +12,7 @@ import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from db import init_db, is_seen, mark_seen
-
+from db import init_db, is_seen, mark_seen, get_price, update_price
 
 load_dotenv()
 RATE_API_BASE = os.getenv("RATE_API_BASE", "https://api.frankfurter.app")
@@ -397,12 +397,59 @@ def send_discord_alert(item: dict) -> None:
     except Exception as e:
         log.error(f"Erreur envoi Discord: {e}")
 
+
+def send_price_drop_alert(item: dict, old_price: int) -> None:
+    """Send Discord embed for price drop"""
+    webhook_url, item_type_fr = get_webhook_for_item(item)
+    if not webhook_url:
+        return
+
+    brand = item["brand"]
+    color = 0x00FF00  # Vert pour baisse de prix
+    price_eur = jpy_to_eur(item["price_jpy"])
+    drop_pct = round((old_price - item["price_jpy"]) / old_price * 100, 1)
+
+    description = (
+        f"📦 **Statut**\n"
+        f"📉 BAISSE (¥{old_price:,} → ¥{item['price_jpy']:,})\n\n"
+        f"💶 **Prix en euros**\n"
+        f"~€{price_eur:.2f}\n\n"
+        f"📊 **Réduction**\n"
+        f"-{drop_pct}%\n\n"
+        f"🕐 **Détecté le**\n"
+        f"{datetime.datetime.now().strftime('%d/%m/%Y à %H:%M')}\n\n"
+        f"🔗 **[Voir l'annonce]({item['url']})**"
+    )
+
+    embed = {
+        "author": {"name": f"{brand} — Baisse de prix 📉"},
+        "title": f"{item_type_fr} {brand[:2]}",
+        "description": description,
+        "color": color,
+        "image": {"url": item["image_url"]} if item["image_url"] else None,
+        "footer": {
+            "text": f"ZenmarketBot • {item['id']} • Aujourd'hui à {datetime.datetime.now().strftime('%H:%M')}"
+        },
+        "timestamp": datetime.datetime.utcnow().isoformat(),
+    }
+
+    payload = {"username": "ZenmarketBot", "embeds": [embed]}
+
+    try:
+        resp = requests.post(webhook_url, json=payload, timeout=10)
+        if resp.status_code in (200, 204):
+            log.info(f"✅ Alerte baisse de prix envoyée pour {item['id']}")
+        else:
+            log.warning(f"Erreur Discord {resp.status_code}: {resp.text}")
+    except Exception as e:
+        log.error(f"Erreur envoi Discord: {e}")
+
 # ────────────────────────────────────────────
 # MAIN LOOP
 # ────────────────────────────────────────────
 def main():
     """Main monitoring loop"""
-    conn = init_db(DB_PATH)  # ← Récupère la connexion
+    conn = init_db(DB_PATH)
     log.info("🚀 Démarrage du bot Buyee→ZenMarket Monitor")
     
     urls = build_search_urls()
@@ -413,6 +460,8 @@ def main():
         log.info("🔍 Nouvelle vérification...")
         
         new_count = 0
+        drop_count = 0
+        
         for brand, url in urls:
             log.info(f"  Scraping {brand}...")
             html = fetch_page(url)
@@ -422,14 +471,23 @@ def main():
             
             items = parse_listings(html, brand)
             for item in items:
-                if not is_seen(conn, item["id"]):  # ← Passe conn
+                if not is_seen(conn, item["id"]):
+                    # Nouvelle annonce
                     send_discord_alert(item)
-                    mark_seen(conn, item["id"], item["title"], item["price_jpy"], item["brand"])  # ← Passe tous les args
+                    mark_seen(conn, item["id"], item["title"], item["price_jpy"], item["brand"])
                     new_count += 1
+                else:
+                    # Annonce déjà vue → vérifie baisse de prix
+                    old_price = get_price(conn, item["id"])
+                    if old_price and item["price_jpy"] < old_price:
+                        log.info(f"📉 Baisse de prix: {item['id']} ¥{old_price:,} → ¥{item['price_jpy']:,}")
+                        send_price_drop_alert(item, old_price)
+                        update_price(conn, item["id"], item["price_jpy"])
+                        drop_count += 1
             
             time.sleep(random.uniform(2, 5))
         
-        log.info(f"✅ Cycle terminé — {new_count} nouvel(les) annonce(s)")
+        log.info(f"✅ Cycle terminé — {new_count} nouvelle(s) annonce(s), {drop_count} baisse(s) de prix")
         
         wait = random.randint(CHECK_INTERVAL[0], CHECK_INTERVAL[1])
         log.info(f"💤 Attente de {wait}s avant prochain cycle")
