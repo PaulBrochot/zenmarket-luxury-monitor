@@ -139,17 +139,23 @@ def build_search_urls() -> list[tuple[str, str]]:
     """Build search URLs for each brand + primary keywords"""
     urls = []
     primary_kw = [
-    "バッグ", "ハンドバッグ", "ショルダーバッグ", "ポシェット",
-    "財布",        # ← WALLET (MANQUANT !)
-    "長財布",      # ← long wallet
-    "折り財布",    # ← compact wallet
+        "バッグ",        # sac générique
+        "ハンドバッグ",  # handbag
+        "ショルダーバッグ", # shoulder bag
+        "ポシェット",    # pochette
+        "ポーチ",        # pouch
+        "クラッチ",      # clutch
+        "トートバッグ",  # tote bag
+        "財布",          # wallet
+        "長財布",        # long wallet
+        "折り財布",      # compact wallet
     ]
     for brand_en, brand_jp in BRAND_MAPPING.items():
         for kw in primary_kw:
             keyword = requests.utils.quote(f"{brand_jp} {kw}")
             url = (
                 "https://buyee.jp/mercari/search"
-                f"?keyword={keyword}&sort=created_time&order=desc"
+                f"?keyword={keyword}&sort=created_time&order=desc&status=buy_now"
             )
             urls.append((brand_en, url))
     return urls
