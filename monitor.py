@@ -139,7 +139,10 @@ def build_search_urls() -> list[tuple[str, str]]:
     """Build search URLs for each brand + primary keywords"""
     urls = []
     primary_kw = [
-        "バッグ", "ハンドバッグ", "ショルダーバッグ", "ポシェット"
+    "バッグ", "ハンドバッグ", "ショルダーバッグ", "ポシェット",
+    "財布",        # ← WALLET (MANQUANT !)
+    "長財布",      # ← long wallet
+    "折り財布",    # ← compact wallet
     ]
     for brand_en, brand_jp in BRAND_MAPPING.items():
         for kw in primary_kw:
