@@ -155,7 +155,7 @@ def build_search_urls() -> list[tuple[str, str]]:
             keyword = requests.utils.quote(f"{brand_jp} {kw}")
             url = (
                 "https://buyee.jp/mercari/search"
-                f"?keyword={keyword}&sort=created_time&order=desc&status=buy_now"
+                f"?keyword={keyword}&sort=created_time&order=desc"
             )
             urls.append((brand_en, url))
     return urls
@@ -209,7 +209,7 @@ def parse_listings(html: str, brand: str) -> list[dict]:
         href = a.get("href", "")
         if not (href.startswith("/mercari/item/") or href.startswith("/mercari/shop/")):
             continue
-        if not href.endswith((".html", "Mercari_DirectSearch")):  # Support les 2 formats d'URL
+        if not href.endswith((".html", "Mercari_DirectSearch")):
             continue
 
         # Extraction ID
@@ -230,7 +230,6 @@ def parse_listings(html: str, brand: str) -> list[dict]:
                    img_tag.get("data-src", "") or
                    img_tag.get("src", "") or
                    "")
-            # Extraction de l'URL depuis data-bind si présent
             if "imagePath:" in src:
                 match = re.search(r"imagePath:\s*'([^']+)'", src)
                 if match:
@@ -242,7 +241,7 @@ def parse_listings(html: str, brand: str) -> list[dict]:
         title_tag = a.find(["p", "h2"], class_=re.compile(r"name|txt"))
         title = title_tag.get_text(strip=True) if title_tag else ""
 
-        # Prix - CORRIGÉ
+        # Prix
         price_tag = a.find(["span", "p"], class_=re.compile(r"price"))
         price_text = price_tag.get_text(strip=True) if price_tag else ""
         price_jpy = 0
@@ -307,9 +306,6 @@ def jpy_to_eur(jpy_amount: int) -> float:
 
     return jpy_amount * rate
 
-    # ────────────────────────────────────────────
-# DISCORD WEBHOOK
-# ────────────────────────────────────────────
 # ────────────────────────────────────────────
 # DISCORD WEBHOOK ROUTING
 # ────────────────────────────────────────────
@@ -373,7 +369,6 @@ def send_discord_alert(item: dict) -> None:
         log.warning(f"Aucun webhook trouvé pour {item['brand']} — alerte ignorée")
         return
 
-    # ── Filtre prix ──
     price_eur = jpy_to_eur(item["price_jpy"])
     item_type = next(
         (k for k, v in {"WALLET": "Portefeuille", "POCHETTE": "Pochette", "SAC": "Sac"}.items()
@@ -384,7 +379,6 @@ def send_discord_alert(item: dict) -> None:
         log.info(f"  💸 Ignoré (€{price_eur:.2f} > seuil €{max_eur}) — {item['title'][:40]}")
         return
 
-    # ── Envoi Discord ──
     brand = item["brand"]
     color = BRAND_COLORS.get(brand, 0x5865F2)
 
@@ -429,7 +423,6 @@ def send_price_drop_alert(item: dict, old_price: int) -> None:
     if not webhook_url:
         return
 
-    # ── Filtre prix ──
     price_eur = jpy_to_eur(item["price_jpy"])
     item_type = next(
         (k for k, v in {"WALLET": "Portefeuille", "POCHETTE": "Pochette", "SAC": "Sac"}.items()
@@ -441,7 +434,7 @@ def send_price_drop_alert(item: dict, old_price: int) -> None:
         return
 
     brand = item["brand"]
-    color = 0x00FF00  # Vert pour baisse de prix
+    color = 0x00FF00
     drop_pct = round((old_price - item["price_jpy"]) / old_price * 100, 1)
 
     description = (
@@ -507,12 +500,10 @@ def main():
             items = parse_listings(html, brand)
             for item in items:
                 if not is_seen(conn, item["id"]):
-                    # Nouvelle annonce
                     send_discord_alert(item)
                     mark_seen(conn, item["id"], item["title"], item["price_jpy"], item["brand"])
                     new_count += 1
                 else:
-                    # Annonce déjà vue → vérifie baisse de prix
                     old_price = get_price(conn, item["id"])
                     if old_price and item["price_jpy"] < old_price:
                         log.info(f"📉 Baisse de prix: {item['id']} ¥{old_price:,} → ¥{item['price_jpy']:,}")
