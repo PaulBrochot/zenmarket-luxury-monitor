@@ -71,7 +71,14 @@ BRAND_COLORS = {
     "Hermès":      0xE87D3E,
 }
 
-
+# ────────────────────────────────────────────
+# SEUILS DE PRIX MAX EN EUR
+# ────────────────────────────────────────────
+PRICE_MAX_EUR = {
+    "WALLET":   60,
+    "POCHETTE": 160,
+    "SAC":      500,
+}
 
 # ────────────────────────────────────────────
 # KEYWORDS
@@ -301,48 +308,52 @@ def get_webhook_for_item(item: dict) -> tuple[str | None, str]:
     """Détermine le webhook Discord selon la marque et le type d'article"""
     brand = item["brand"]
     title_lower = item["title"].lower()
-    
-    # Détection du type d'article
-    if any(kw in title_lower for kw in ["財布", "wallet", "portefeuille", "porte-monnaie", "小銭入れ"]):
+
+    if any(kw in title_lower for kw in [
+        "財布", "ウォレット", "小銭入れ", "カードケース",
+        "カードホルダー", "キーケース", "コインケース",
+        "長財布", "折り財布", "二つ折り", "三つ折り",
+        "wallet", "portefeuille", "porte-monnaie",
+        "porte-carte", "card holder", "card case", "key case",
+    ]):
         item_type = "WALLET"
         item_type_fr = "Portefeuille"
-    elif any(kw in title_lower for kw in ["ポシェット", "pochette", "ポーチ", "pouch", "クラッチ", "clutch"]):
+    elif any(kw in title_lower for kw in [
+        "ポシェット", "pochette", "ポーチ", "pouch", "クラッチ", "clutch",
+    ]):
         item_type = "POCHETTE"
         item_type_fr = "Pochette"
-    elif any(kw in title_lower for kw in ["バッグ", "bag", "sac", "トート", "tote", "ショルダー", "shoulder", "ハンドバッグ", "handbag"]):
+    elif any(kw in title_lower for kw in [
+        "バッグ", "bag", "sac", "トート", "tote",
+        "ショルダー", "shoulder", "ハンドバッグ", "handbag",
+    ]):
         item_type = "SAC"
         item_type_fr = "Sac"
     else:
         item_type = "SAC"
         item_type_fr = "Accessoire"
-    
-    # Mapping marque → webhook
+
     webhook_map = {
-        ("Louis Vuitton", "WALLET"): os.getenv("WEBHOOK_LV_WALLET"),
+        ("Louis Vuitton", "WALLET"):   os.getenv("WEBHOOK_LV_WALLET"),
         ("Louis Vuitton", "POCHETTE"): os.getenv("WEBHOOK_LV_POCHETTE"),
-        ("Louis Vuitton", "SAC"): os.getenv("WEBHOOK_LV_SAC"),
-        
-        ("Gucci", "WALLET"): os.getenv("WEBHOOK_GUCCI_WALLET"),
-        ("Gucci", "POCHETTE"): os.getenv("WEBHOOK_GUCCI_POCHETTE"),
-        ("Gucci", "SAC"): os.getenv("WEBHOOK_GUCCI_SAC"),
-        
-        ("Prada", "WALLET"): os.getenv("WEBHOOK_PRADA_WALLET"),
-        ("Prada", "POCHETTE"): os.getenv("WEBHOOK_PRADA_POCHETTE"),
-        ("Prada", "SAC"): os.getenv("WEBHOOK_PRADA_SAC"),
-        
-        ("Celine", "WALLET"): os.getenv("WEBHOOK_CELINE_WALLET"),
-        ("Celine", "POCHETTE"): os.getenv("WEBHOOK_CELINE_POCHETTE"),
-        ("Celine", "SAC"): os.getenv("WEBHOOK_CELINE_SAC"),
-        
-        ("Hermès", "WALLET"): os.getenv("WEBHOOK_HERMES_WALLET"),
-        ("Hermès", "POCHETTE"): os.getenv("WEBHOOK_HERMES_POCHETTE"),
-        ("Hermès", "SAC"): os.getenv("WEBHOOK_HERMES_SAC"),
+        ("Louis Vuitton", "SAC"):      os.getenv("WEBHOOK_LV_SAC"),
+        ("Gucci", "WALLET"):           os.getenv("WEBHOOK_GUCCI_WALLET"),
+        ("Gucci", "POCHETTE"):         os.getenv("WEBHOOK_GUCCI_POCHETTE"),
+        ("Gucci", "SAC"):              os.getenv("WEBHOOK_GUCCI_SAC"),
+        ("Prada", "WALLET"):           os.getenv("WEBHOOK_PRADA_WALLET"),
+        ("Prada", "POCHETTE"):         os.getenv("WEBHOOK_PRADA_POCHETTE"),
+        ("Prada", "SAC"):              os.getenv("WEBHOOK_PRADA_SAC"),
+        ("Celine", "WALLET"):          os.getenv("WEBHOOK_CELINE_WALLET"),
+        ("Celine", "POCHETTE"):        os.getenv("WEBHOOK_CELINE_POCHETTE"),
+        ("Celine", "SAC"):             os.getenv("WEBHOOK_CELINE_SAC"),
+        ("Hermès", "WALLET"):          os.getenv("WEBHOOK_HERMES_WALLET"),
+        ("Hermès", "POCHETTE"):        os.getenv("WEBHOOK_HERMES_POCHETTE"),
+        ("Hermès", "SAC"):             os.getenv("WEBHOOK_HERMES_SAC"),
     }
-    
+
     webhook = webhook_map.get((brand, item_type))
     if webhook:
-        log.info(f"  📤 Routage: {brand} {item_type}")
-    
+        log.info(f"  📤 Routage: {brand} → {item_type}")
     return webhook, item_type_fr
 
 
@@ -353,9 +364,20 @@ def send_discord_alert(item: dict) -> None:
         log.warning(f"Aucun webhook trouvé pour {item['brand']} — alerte ignorée")
         return
 
+    # ── Filtre prix ──
+    price_eur = jpy_to_eur(item["price_jpy"])
+    item_type = next(
+        (k for k, v in {"WALLET": "Portefeuille", "POCHETTE": "Pochette", "SAC": "Sac"}.items()
+         if v == item_type_fr), "SAC"
+    )
+    max_eur = PRICE_MAX_EUR.get(item_type, 9999)
+    if price_eur > max_eur:
+        log.info(f"  💸 Ignoré (€{price_eur:.2f} > seuil €{max_eur}) — {item['title'][:40]}")
+        return
+
+    # ── Envoi Discord ──
     brand = item["brand"]
     color = BRAND_COLORS.get(brand, 0x5865F2)
-    price_eur = jpy_to_eur(item["price_jpy"])
 
     description = (
         f"📦 **Statut**\n"
@@ -370,9 +392,7 @@ def send_discord_alert(item: dict) -> None:
     )
 
     embed = {
-        "author": {
-            "name": f"{brand} — Nouvelle annonce"
-        },
+        "author": {"name": f"{brand} — Nouvelle annonce"},
         "title": f"{item_type_fr} {brand[:2]}",
         "description": description,
         "color": color,
@@ -383,10 +403,7 @@ def send_discord_alert(item: dict) -> None:
         "timestamp": datetime.datetime.utcnow().isoformat(),
     }
 
-    payload = {
-        "username": "ZenmarketBot",
-        "embeds": [embed]
-    }
+    payload = {"username": "ZenmarketBot", "embeds": [embed]}
 
     try:
         resp = requests.post(webhook_url, json=payload, timeout=10)
@@ -397,16 +414,25 @@ def send_discord_alert(item: dict) -> None:
     except Exception as e:
         log.error(f"Erreur envoi Discord: {e}")
 
-
 def send_price_drop_alert(item: dict, old_price: int) -> None:
     """Send Discord embed for price drop"""
     webhook_url, item_type_fr = get_webhook_for_item(item)
     if not webhook_url:
         return
 
+    # ── Filtre prix ──
+    price_eur = jpy_to_eur(item["price_jpy"])
+    item_type = next(
+        (k for k, v in {"WALLET": "Portefeuille", "POCHETTE": "Pochette", "SAC": "Sac"}.items()
+         if v == item_type_fr), "SAC"
+    )
+    max_eur = PRICE_MAX_EUR.get(item_type, 9999)
+    if price_eur > max_eur:
+        log.info(f"  💸 Baisse ignorée (€{price_eur:.2f} > seuil €{max_eur})")
+        return
+
     brand = item["brand"]
     color = 0x00FF00  # Vert pour baisse de prix
-    price_eur = jpy_to_eur(item["price_jpy"])
     drop_pct = round((old_price - item["price_jpy"]) / old_price * 100, 1)
 
     description = (
