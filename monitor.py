@@ -129,7 +129,6 @@ def get_browser_context():
                 "Accept-Language": "ja-JP,ja;q=0.9,en-US;q=0.8",
             },
         )
-        # Masque navigator.webdriver
         _context.add_init_script(
             "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
         )
@@ -145,7 +144,6 @@ def fetch_page(url: str) -> str | None:
             ctx = get_browser_context()
             page = ctx.new_page()
             page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-            # Petite pause humaine
             page.wait_for_timeout(random.randint(1500, 3000))
             html = page.content()
             log.info(f"HTML récupéré: {len(html)} caractères")
@@ -364,7 +362,7 @@ def send_discord_alert(item: dict) -> None:
         "color":       BRAND_COLORS.get(brand, 0x5865F2),
         "image":       {"url": item["image_url"]} if item["image_url"] else None,
         "footer":      {"text": f"ZenmarketBot • {item['id']} • {datetime.datetime.now().strftime('%H:%M')}"},
-        "timestamp":   datetime.datetime.utcnow().isoformat(),
+        "timestamp":   datetime.datetime.now(datetime.UTC).isoformat(),
     }
     _send_embed(webhook_url, embed)
 
@@ -394,7 +392,7 @@ def send_price_drop_alert(item: dict, old_price: int) -> None:
         "color":       0x00FF00,
         "image":       {"url": item["image_url"]} if item["image_url"] else None,
         "footer":      {"text": f"ZenmarketBot • {item['id']} • {datetime.datetime.now().strftime('%H:%M')}"},
-        "timestamp":   datetime.datetime.utcnow().isoformat(),
+        "timestamp":   datetime.datetime.now(datetime.UTC).isoformat(),
     }
     _send_embed(webhook_url, embed)
 
@@ -410,7 +408,6 @@ def main():
     urls = build_search_urls()
     log.info(f"📌 {len(urls)} URL(s) de recherche générées")
 
-    # Préchauffage du navigateur
     get_browser_context()
 
     while True:
