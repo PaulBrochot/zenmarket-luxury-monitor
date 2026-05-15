@@ -1,0 +1,4 @@
+  File "/Users/paulbrocot/Downloads/zenmarket-luxury-monitor-main/zenmarket-luxury-monitor/monitor.py", line 205
+    src = (img_tag.get("data-src", "") or
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+SyntaxError: invalid syntax. Perhaps you forgot a comma?

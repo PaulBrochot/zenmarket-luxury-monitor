@@ -1,331 +1,444 @@
+""" monitor.py — Buyee Mercari → ZenMarket Luxury Monitor
+Source : buyee.jp/mercari/search (achat immédiat uniquement)
+Alertes : Discord embeds par salon selon la catégorie de l'article
 """
-monitor.py — Buyee Mercari → ZenMarket Luxury Monitor
-
-Source  : buyee.jp/mercari/search (achat immédiat uniquement)
-Alertes : Discord embed avec lien ZenMarket (mercari.aspx) + lien Buyee
-"""
-
 import os
 import re
 import time
 import random
 import logging
+import datetime
 import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from db import init_db, is_seen, mark_seen
 
+
 load_dotenv()
+RATE_API_BASE = os.getenv("RATE_API_BASE", "https://api.frankfurter.app")
+DB_PATH     = os.getenv("DB_PATH", "data/seen_items.db")
+CHECK_INTERVAL = (int(os.getenv("CHECK_MIN", "120")),
+                   int(os.getenv("CHECK_MAX", "300")))
+MAX_PAGES   = int(os.getenv("MAX_PAGES", "3"))
 
-WEBHOOK_URL     = os.getenv("DISCORD_WEBHOOK_URL", "")
-RATE_API_BASE   = os.getenv("RATE_API_BASE", "https://api.frankfurter.app")
-DB_PATH         = os.getenv("DB_PATH", "data/seen_items.db")
-CHECK_INTERVAL = (int(os.getenv("CHECK_MIN", "120")), int(os.getenv("CHECK_MAX", "300")))
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.StreamHandler()],
-)
+
+# ────────────────────────────────────────────
+# LOGGING
+# ────────────────────────────────────────────
+logging.basicConfig(level=logging.INFO,
+                    format="%(asctime)s [%(levelname)s] %(message)s",
+                    handlers=[logging.StreamHandler()])
 log = logging.getLogger("buyee-mercari-monitor")
 
+
+
+# ────────────────────────────────────────────
+# USER AGENTS
+# ────────────────────────────────────────────
 USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5) AppleWebKit/605.1.15 "
+    "(KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) "
+    "Gecko/20100101 Firefox/125.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
+    "(KHTML, like Gecko) Version/16.6 Safari/605.1.15",
 ]
 
+
+
+# ────────────────────────────────────────────
+# BRAND MAPPING + COLORS
+# ────────────────────────────────────────────
 BRAND_MAPPING = {
     "Louis Vuitton": "ルイ・ヴィトン",
-    "Prada":         "プラダ",
-    "Celine":        "セリーヌ",
-    "Gucci":         "グッチ",
-    "Hermès":        "エルメス",
+    "Prada": "プラダ",
+    "Celine": "セリーヌ",
+    "Gucci": "グッチ",
+    "Hermès": "エルメス",
 }
 
+
+BRAND_COLORS = {
+    "Louis Vuitton": 0xA0522D,
+    "Prada":       0x2C2C2C,
+    "Celine":      0x4A90E2,
+    "Gucci":       0xC41E3A,
+    "Hermès":      0xE87D3E,
+}
+
+
+
+# ────────────────────────────────────────────
+# KEYWORDS
+# ────────────────────────────────────────────
 KEYWORDS_JP = [
     "バッグ", "ハンドバッグ", "ショルダー", "ポシェット",
     "トートバッグ", "クラッチ", "財布", "レザー", "本革",
 ]
 KEYWORDS_EN = [
-    "bag", "pochette", "tote", "clutch", "leather", "purse", "handbag", "wallet",
-    "speedy", "neverfull", "alma", "keepall", "vuitton", "louis", "lv",
+    "bag", "pochette", "tote", "clutch", "leather", "purse",
+    "handbag", "wallet", "speedy", "neverfull", "alma",
+    "keepall", "vuitton", "louis", "lv",
 ]
 EXCLUDE_KEYWORDS = [
-    "空笱", "空き笱", "ショップ袋", "紙袋", "保存袋", "ダストバッグ", "保存箱",
-    "dustbag", "dust bag", "empty box", "shopping bag only",
+    "空き箱", "ショップ袋", "紙袋", "保存袋", "ダストバッグ",
+    "保存箱", "dustbag", "dust bag", "empty box", "shopping bag only",
 ]
 
-# Session partagée pour maintenir les cookies
-_session      = requests.Session()
+
+
+# ────────────────────────────────────────────
+# SESSION
+# ────────────────────────────────────────────
+_session = requests.Session()
 _session_init = False
-_ua           = random.choice(USER_AGENTS)
+_ua = random.choice(USER_AGENTS)
+
 
 
 def init_session() -> None:
+    """Initialize session with Buyee cookies"""
     global _session_init
     if _session_init:
         return
-    headers = {
-        "User-Agent":      _ua,
-        "Accept-Language": "ja,en-US;q=0.8,en;q=0.6",
-        "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Connection":      "keep-alive",
-    }
+
+    headers = { "User-Agent": random.choice(USER_AGENTS) }
+    log.info("Init session — fetching cookies Buyee")
+
+    _session.get("https://buyee.jp", headers=headers, timeout=20)
+    _session.get(
+        "https://buyee.jp/mercari/search?keyword=%E3%83%90%E3%83%83%E3%82%B0",
+        headers=headers, timeout=20
+    )
+
+    ua = random.choice(USER_AGENTS)
+    headers = { "User-Agent": ua }
     _session.headers.update(headers)
-    try:
-        r1 = _session.get("https://buyee.jp/", timeout=15)
-        log.info(f"Init step 1 (root) : {r1.status_code} / {len(r1.text)} chars")
-        time.sleep(random.uniform(1.5, 3))
-        r2 = _session.get("https://buyee.jp/mercari/", timeout=15,
-                          headers={"Referer": "https://buyee.jp/"})
-        log.info(f"Init step 2 (mercari) : {r2.status_code} / {len(r2.text)} chars")
-        time.sleep(random.uniform(1, 2))
-        _session_init = True
-        log.info(f"Cookies : {list(_session.cookies.keys())}")
-    except Exception as e:
-        log.warning(f"Init session erreur : {e}")
+
+    log.info(f"Cookies: {list(_session.cookies.keys())}")
+    _session_init = True
 
 
+
+# ────────────────────────────────────────────
+# SEARCH URLS
+# ────────────────────────────────────────────
 def build_search_urls() -> list[tuple[str, str]]:
+    """Build search URLs for each brand + primary keywords"""
     urls = []
-    primary_kw = ["バッグ", "ハンドバッグ", "ショルダーバッグ", "ポシェット"]
+    primary_kw = [
+        "バッグ", "ハンドバッグ", "ショルダーバッグ", "ポシェット"
+    ]
     for brand_en, brand_jp in BRAND_MAPPING.items():
         for kw in primary_kw:
             keyword = requests.utils.quote(f"{brand_jp} {kw}")
-            url = f"https://buyee.jp/mercari/search?keyword={keyword}&sort=created_time&order=desc"
+            url = (
+                "https://buyee.jp/mercari/search"
+                f"?keyword={keyword}&sort=created_time&order=desc"
+            )
             urls.append((brand_en, url))
     return urls
+
+
+
+# ────────────────────────────────────────────
+# FETCH
+# ────────────────────────────────────────────
+def fetch_page(url: str) -> str | None:
+    """Fetch page HTML with session & rotated UA"""
+    init_session()
+
+    _ua = random.choice(USER_AGENTS)
+    _session.headers["User-Agent"] = _ua
+
+    for attempt in range(3):
+        try:
+            resp = _session.get(url, timeout=25)
+            if resp.status_code == 200:
+                resp.encoding = resp.apparent_encoding
+                html = resp.text
+                log.info(f"HTML récupéré: {len(html)} caractères")
+                return html
+            log.warning(f"HTTP {resp.status_code} — attempt {attempt + 1}/3")
+            time.sleep(3 + attempt * 5)
+        except Exception as e:
+            log.warning(f"Erreur réseau: {e} — attempt {attempt + 1}/3")
+            time.sleep(3 + attempt * 5)
+
+    return None
+
+
+
+# ────────────────────────────────────────────
+# PARSE LISTINGS
+# ────────────────────────────────────────────
+def parse_listings(html: str, brand: str) -> list[dict]:
+    """Parse Mercari listings, filter excludes, extract item data"""
+    soup = BeautifulSoup(html, "lxml")
+    items = []
+    seen_ids = set()
+
+    a_tags = soup.select(
+        "li a[href*='/mercari/item/'], "
+        "li a[href*='/mercari/shop/']"
+    )
+    log.info(f"Found {len(a_tags)} item links")
+
+    for a in a_tags:
+        href = a.get("href", "")
+        if not (href.startswith("/mercari/item/") or href.startswith("/mercari/shop/")):
+            continue
+        if not href.endswith((".html", "Mercari_DirectSearch")):  # Support les 2 formats d'URL
+            continue
+
+        # Extraction ID
+        if "?" in href:
+            item_id = href.split("/")[-1].split("?")[0]
+        else:
+            item_id = href.split("/")[-1].replace(".html", "")
+            
+        if item_id in seen_ids:
+            continue
+        seen_ids.add(item_id)
+
+        # Image
+        img_tag = a.find("img")
+        image_url = ""
+        if img_tag:
+            src = (img_tag.get("data-bind", "") or
+                   img_tag.get("data-src", "") or
+                   img_tag.get("src", "") or
+                   "")
+            # Extraction de l'URL depuis data-bind si présent
+            if "imagePath:" in src:
+                match = re.search(r"imagePath:\s*'([^']+)'", src)
+                if match:
+                    image_url = "https:" + match.group(1).replace("@jpg", "")
+            elif src and not src.startswith("data:"):
+                image_url = src
+
+        # Titre
+        title_tag = a.find(["p", "h2"], class_=re.compile(r"name|txt"))
+        title = title_tag.get_text(strip=True) if title_tag else ""
+
+        # Prix - CORRIGÉ
+        price_tag = a.find(["span", "p"], class_=re.compile(r"price"))
+        price_text = price_tag.get_text(strip=True) if price_tag else ""
+        price_jpy = 0
+        m = re.search(r"(\d{1,3}(?:,\d{3})*)", price_text)
+        if m:
+            price_jpy = int(m.group(1).replace(",", ""))
+
+        if price_jpy == 0 or price_jpy < 100:
+            continue
+
+        if any(ex in title.lower() for ex in EXCLUDE_KEYWORDS):
+            continue
+
+        title_clean = "".join(title.split())
+        if len(title_clean) < 3:
+            continue
+
+        item = {
+            "id": item_id,
+            "title": title_clean,
+            "price_jpy": price_jpy,
+            "brand": brand,
+            "image_url": image_url,
+            "url": item_to_zenmarket_url(item_id),
+            "buyee_url": f"https://buyee.jp{href}",
+        }
+        items.append(item)
+
+    log.info(f"  → {len(items)} annonce(s) pour {brand}")
+    return items
 
 
 def item_to_zenmarket_url(item_id: str) -> str:
     return f"https://zenmarket.jp/en/mercariproduct.aspx?itemCode={item_id}"
 
 
-def fetch_page(url: str) -> str | None:
-    init_session()
-    headers = {
-        "User-Agent":      random.choice(USER_AGENTS),
-        "Accept-Language": "ja,en-US;q=0.8,en;q=0.6",
-        "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Referer":         "https://buyee.jp/mercari/",
-        "DNT":             "1",
-        "Connection":      "keep-alive",
-    }
-    try:
-        resp = _session.get(url, headers=headers, timeout=20)
-        resp.encoding = "utf-8"
-        if resp.status_code == 200:
-            log.info(f"HTML récupéré : {len(resp.text)} caractères")
-            return resp.text
-        log.warning(f"HTTP {resp.status_code} pour {url}")
-        return None
-    except Exception as e:
-        log.error(f"Erreur fetch : {e}")
-        return None
+
+# ────────────────────────────────────────────
+# EXCHANGE RATE
+# ────────────────────────────────────────────
+_rate_cache: tuple[float, float] = (0.0, 0.0)
 
 
-def parse_listings(html: str, brand: str) -> list[dict]:
-    soup  = BeautifulSoup(html, "lxml")
-    items = []
+def jpy_to_eur(jpy_amount: int) -> float:
+    """Fetch JPY→EUR rate with 1-hour cache"""
+    global _rate_cache
+    if jpy_amount <= 0:
+        return 0.0
 
-    links = soup.select("a[href*='/mercari/item/']") or \
-            soup.select("a[href*='conversionType=Mercari']")
-
-    seen_ids = set()
-    for link in links:
-        try:
-            href = str(link.get("href", ""))
-
-            m = re.search(r"/mercari/item/([A-Za-z0-9]+)", href)
-            if not m:
-                continue
-            item_id = m.group(1)
-            if item_id in seen_ids:
-                continue
-            seen_ids.add(item_id)
-
-            title_tag = link.select_one("h2.name")
-            title = title_tag.get_text(strip=True) if title_tag else link.get_text(separator=" ", strip=True)
-            title = re.sub(r"^(Avec Authentification|SALE)\s*", "", title).strip()
-            if len(title) < 5:
-                continue
-
-            title_lower = title.lower()
-
-            if any(kw in title for kw in EXCLUDE_KEYWORDS) or \
-               any(kw in title_lower for kw in EXCLUDE_KEYWORDS):
-                continue
-
-            zenmarket_url = item_to_zenmarket_url(item_id)
-            buyee_url = (f"https://buyee.jp{href}" if href.startswith("/") else href)
-            buyee_url = buyee_url.split("?")[0]
-
-            price_jpy = 0
-            price_tag = link.select_one("p.price")
-            if price_tag:
-                m_price = re.search(r"([\d,]+)円", price_tag.get_text())
-                if m_price:
-                    price_jpy = int(m_price.group(1).replace(",", ""))
-
-            image_url = ""
-            img = link.select_one("img.thumbnail")
-            if img:
-                data_bind = img.get("data-bind", "")
-                m_img = re.search(r"imagePath:\s*'([^']+)'", data_bind)
-                if m_img:
-                    raw = m_img.group(1)
-                    image_url = ("https:" + raw) if raw.startswith("//") else raw
-                    image_url = image_url.split("?")[0]
-
-            items.append({
-                "id":        item_id,
-                "title":     title,
-                "price_jpy": price_jpy,
-                "url":       zenmarket_url,
-                "buyee_url": buyee_url,
-                "image_url": image_url,
-                "brand":     brand,
-            })
-
-        except Exception as e:
-            log.debug(f"Erreur parsing link : {e}")
-            continue
-
-    log.info(f"  → {len(items)} annonce(s) pour {brand}")
-    return items
-
-
-_rate_cache: dict = {}
-
-def get_jpy_eur_rate() -> float:
     now = time.time()
-    if "r" in _rate_cache and now - _rate_cache["t"] < 3600:
-        return _rate_cache["r"]
-    try:
-        resp = requests.get(f"{RATE_API_BASE}/latest",
-                            params={"from": "JPY", "to": "EUR"}, timeout=10)
-        rate = resp.json()["rates"]["EUR"]
-        _rate_cache.update({"r": rate, "t": now})
-        log.info(f"Taux JPY→EUR : {rate:.6f}")
-        return rate
-    except Exception as e:
-        log.error(f"Erreur taux change : {e}")
-        return _rate_cache.get("r", 0.0059)
+    if _rate_cache[0] and (now - _rate_cache[0]) < 3600:
+        rate = _rate_cache[1]
+    else:
+        try:
+            resp = requests.get(f"{RATE_API_BASE}/latest?from=JPY&to=EUR", timeout=10)
+            data = resp.json()
+            rate = data.get("rates", {}).get("EUR", 0.0)
+            _rate_cache = (now, rate)
+        except Exception as e:
+            log.warning(f"Erreur lors de la récupération du taux JPY→EUR: {e}")
+            rate = 0.0065  # fallback
 
-def jpy_to_eur(jpy: int) -> float:
-    return round(jpy * get_jpy_eur_rate(), 2)
+    return jpy_amount * rate
+
+    # ────────────────────────────────────────────
+# DISCORD WEBHOOK
+# ────────────────────────────────────────────
+# ────────────────────────────────────────────
+# DISCORD WEBHOOK ROUTING
+# ────────────────────────────────────────────
+def get_webhook_for_item(item: dict) -> tuple[str | None, str]:
+    """Détermine le webhook Discord selon la marque et le type d'article"""
+    brand = item["brand"]
+    title_lower = item["title"].lower()
+    
+    # Détection du type d'article
+    if any(kw in title_lower for kw in ["財布", "wallet", "portefeuille", "porte-monnaie", "小銭入れ"]):
+        item_type = "WALLET"
+        item_type_fr = "Portefeuille"
+    elif any(kw in title_lower for kw in ["ポシェット", "pochette", "ポーチ", "pouch", "クラッチ", "clutch"]):
+        item_type = "POCHETTE"
+        item_type_fr = "Pochette"
+    elif any(kw in title_lower for kw in ["バッグ", "bag", "sac", "トート", "tote", "ショルダー", "shoulder", "ハンドバッグ", "handbag"]):
+        item_type = "SAC"
+        item_type_fr = "Sac"
+    else:
+        item_type = "SAC"
+        item_type_fr = "Accessoire"
+    
+    # Mapping marque → webhook
+    webhook_map = {
+        ("Louis Vuitton", "WALLET"): os.getenv("WEBHOOK_LV_WALLET"),
+        ("Louis Vuitton", "POCHETTE"): os.getenv("WEBHOOK_LV_POCHETTE"),
+        ("Louis Vuitton", "SAC"): os.getenv("WEBHOOK_LV_SAC"),
+        
+        ("Gucci", "WALLET"): os.getenv("WEBHOOK_GUCCI_WALLET"),
+        ("Gucci", "POCHETTE"): os.getenv("WEBHOOK_GUCCI_POCHETTE"),
+        ("Gucci", "SAC"): os.getenv("WEBHOOK_GUCCI_SAC"),
+        
+        ("Prada", "WALLET"): os.getenv("WEBHOOK_PRADA_WALLET"),
+        ("Prada", "POCHETTE"): os.getenv("WEBHOOK_PRADA_POCHETTE"),
+        ("Prada", "SAC"): os.getenv("WEBHOOK_PRADA_SAC"),
+        
+        ("Celine", "WALLET"): os.getenv("WEBHOOK_CELINE_WALLET"),
+        ("Celine", "POCHETTE"): os.getenv("WEBHOOK_CELINE_POCHETTE"),
+        ("Celine", "SAC"): os.getenv("WEBHOOK_CELINE_SAC"),
+        
+        ("Hermès", "WALLET"): os.getenv("WEBHOOK_HERMES_WALLET"),
+        ("Hermès", "POCHETTE"): os.getenv("WEBHOOK_HERMES_POCHETTE"),
+        ("Hermès", "SAC"): os.getenv("WEBHOOK_HERMES_SAC"),
+    }
+    
+    webhook = webhook_map.get((brand, item_type))
+    if webhook:
+        log.info(f"  📤 Routage: {brand} {item_type}")
+    
+    return webhook, item_type_fr
 
 
-BRAND_COLORS = {
-    "Louis Vuitton": 0xC49A3A,
-    "Prada":         0x1A1A1A,
-    "Celine":        0x8B6F47,
-    "Gucci":         0x2E7D32,
-    "Hermès":        0xE25C00,
-}
+def send_discord_alert(item: dict) -> None:
+    """Send Discord embed for new item (French compact format)"""
+    webhook_url, item_type_fr = get_webhook_for_item(item)
+    if not webhook_url:
+        log.warning(f"Aucun webhook trouvé pour {item['brand']} — alerte ignorée")
+        return
 
-def send_discord_alert(item: dict) -> bool:
-    if not WEBHOOK_URL:
-        log.error("DISCORD_WEBHOOK_URL non définie dans .env")
-        return False
-
+    brand = item["brand"]
+    color = BRAND_COLORS.get(brand, 0x5865F2)
     price_eur = jpy_to_eur(item["price_jpy"])
-    brand     = item.get("brand", "Inconnue")
-    color     = BRAND_COLORS.get(brand, 0x7289DA)
+
+    description = (
+        f"📦 **Statut**\n"
+        f"🔵 NOUVELLE ANNONCE\n\n"
+        f"💴 **Prix en yen**\n"
+        f"¥{item['price_jpy']:,}\n\n"
+        f"💶 **Prix en euros**\n"
+        f"~€{price_eur:.2f}\n\n"
+        f"🕐 **Détecté le**\n"
+        f"{datetime.datetime.now().strftime('%d/%m/%Y à %H:%M')}\n\n"
+        f"🔗 **[Voir l'annonce]({item['url']})**"
+    )
 
     embed = {
-        "title":       item["title"][:256],
-        "url":         item.get("buyee_url", item["url"]),
-        "color":       color,
-        "description": (
-            f"🏷️ Nouvelle annonce — **{brand}**\n"
-            f"[🛍️ Acheter sur ZenMarket]({item['url']})"
-        ),
-        "fields": [
-            {"name": "💴 Prix JPY",       "value": f"¥ {item['price_jpy']:,}" if item['price_jpy'] else "N/A", "inline": True},
-            {"name": "💶 Prix EUR (est.)", "value": f"€ {price_eur:,.2f}"        if item['price_jpy'] else "N/A", "inline": True},
-            {"name": "👜 Marque",          "value": brand,                                                       "inline": True},
-        ],
-        "footer":    {"text": "Mercari Japan via Buyee • Achat immédiat • ZenMarket pour commander"},
-        "timestamp": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+        "author": {
+            "name": f"{brand} — Nouvelle annonce"
+        },
+        "title": f"{item_type_fr} {brand[:2]}",
+        "description": description,
+        "color": color,
+        "image": {"url": item["image_url"]} if item["image_url"] else None,
+        "footer": {
+            "text": f"ZenmarketBot • {item['id']} • Aujourd'hui à {datetime.datetime.now().strftime('%H:%M')}"
+        },
+        "timestamp": datetime.datetime.utcnow().isoformat(),
     }
 
-    if item.get("image_url"):
-        embed["image"]     = {"url": item["image_url"]}
-        embed["thumbnail"] = {"url": item["image_url"]}
-
     payload = {
-        "username":   "Luxury Monitor 🛍️",
-        "avatar_url": "https://zenmarket.jp/Content/img/header-logo.png",
-        "embeds":     [embed],
+        "username": "ZenmarketBot",
+        "embeds": [embed]
     }
 
     try:
-        resp = requests.post(WEBHOOK_URL, json=payload,
-                             headers={"Content-Type": "application/json"}, timeout=10)
+        resp = requests.post(webhook_url, json=payload, timeout=10)
         if resp.status_code in (200, 204):
-            log.info(f"✅ Alerté : {item['title'][:60]}")
-            return True
-        log.error(f"Discord HTTP {resp.status_code} : {resp.text}")
-        return False
+            log.info(f"✅ Alerte Discord envoyée pour {item['id']}")
+        else:
+            log.warning(f"Erreur Discord {resp.status_code}: {resp.text}")
     except Exception as e:
-        log.error(f"Erreur Discord : {e}")
-        return False
+        log.error(f"Erreur envoi Discord: {e}")
 
+# ────────────────────────────────────────────
+# MAIN LOOP
+# ────────────────────────────────────────────
+def main():
+    """Main monitoring loop"""
+    conn = init_db(DB_PATH)  # ← Récupère la connexion
+    log.info("🚀 Démarrage du bot Buyee→ZenMarket Monitor")
+    
+    urls = build_search_urls()
+    log.info(f"📌 {len(urls)} URL(s) de recherche générées")
 
-def run():
-    log.info("🚀 Démarrage — Buyee Mercari (achat immédiat) → Discord")
-    conn        = init_db(DB_PATH)
-    search_urls = build_search_urls()
-    log.info(f"{len(search_urls)} requêtes configurées")
-
-    cycle = 0
     while True:
-        cycle += 1
-        log.info(f"── Cycle #{cycle} {'='*30}")
-        new_items = 0
-        is_seed   = (cycle == 1)
-
-        if is_seed:
-            log.info("🌱 Cycle #1 : seed silencieux (marquage sans alerte)")
-
-        for brand, url in search_urls:
-            log.info(f"Scraping {brand}")
+        log.info("─" * 60)
+        log.info("🔍 Nouvelle vérification...")
+        
+        new_count = 0
+        for brand, url in urls:
+            log.info(f"  Scraping {brand}...")
             html = fetch_page(url)
             if not html:
-                time.sleep(random.uniform(5, 12))
+                log.warning(f"  ⚠️  Impossible de récupérer {brand}")
                 continue
-
-            listings = parse_listings(html, brand)
-
-            for item in listings:
-                if is_seen(conn, item["id"]):
-                    continue
-                if is_seed:
-                    # Premier cycle : on marque sans envoyer sur Discord
-                    mark_seen(conn, item["id"], item["title"], item["price_jpy"], brand)
-                else:
-                    sent = send_discord_alert(item)
-                    if sent:
-                        mark_seen(conn, item["id"], item["title"], item["price_jpy"], brand)
-                        new_items += 1
-                    time.sleep(random.uniform(0.5, 1.5))
-
-            time.sleep(random.uniform(3, 7))
-
-        if is_seed:
-            log.info(f"Cycle #1 seed terminé — items existants marqués, en attente de nouveaux…")
-        else:
-            log.info(f"Cycle #{cycle} — {new_items} alerte(s) envoyée(s)")
-
-        wait = random.randint(*CHECK_INTERVAL)
-        log.info(f"Prochain cycle dans {wait}s …")
+            
+            items = parse_listings(html, brand)
+            for item in items:
+                if not is_seen(conn, item["id"]):  # ← Passe conn
+                    send_discord_alert(item)
+                    mark_seen(conn, item["id"], item["title"], item["price_jpy"], item["brand"])  # ← Passe tous les args
+                    new_count += 1
+            
+            time.sleep(random.uniform(2, 5))
+        
+        log.info(f"✅ Cycle terminé — {new_count} nouvel(les) annonce(s)")
+        
+        wait = random.randint(CHECK_INTERVAL[0], CHECK_INTERVAL[1])
+        log.info(f"💤 Attente de {wait}s avant prochain cycle")
         time.sleep(wait)
 
-
 if __name__ == "__main__":
-    run()
+    try:
+        main()
+    except KeyboardInterrupt:
+        log.info("\n👋 Arrêt du bot (Ctrl+C)")
+    except Exception as e:
+        log.error(f"❌ Erreur fatale: {e}", exc_info=True)
