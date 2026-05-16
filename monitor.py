@@ -19,6 +19,8 @@ RATE_API_BASE   = os.getenv("RATE_API_BASE", "https://api.frankfurter.app")
 DB_PATH         = os.getenv("DB_PATH", "data/seen_items.db")
 CHECK_INTERVAL  = (int(os.getenv("CHECK_MIN", "120")), int(os.getenv("CHECK_MAX", "300")))
 MAX_PAGES       = int(os.getenv("MAX_PAGES", "3"))
+PAGE_TIMEOUT    = 20_000   # 20s max par page
+MAX_CONSECUTIVE_FAILURES = 5  # reset navigateur après N echecs consécutifs
 
 
 
@@ -74,7 +76,6 @@ EXCLUDE_KEYWORDS = [
 # SEARCH URLS
 # ────────────────────────────────────────────
 def build_search_urls() -> list[tuple[str, str]]:
-    """Build search URLs for each brand + primary keywords"""
     primary_kw = [
         "バッグ", "ハンドバッグ", "ショルダーバッグ",
         "ポシェット", "ポーチ", "クラッチ", "トートバッグ",
@@ -99,6 +100,30 @@ def build_search_urls() -> list[tuple[str, str]]:
 _playwright_instance = None
 _browser = None
 _context = None
+_consecutive_failures = 0
+
+
+def reset_browser() -> None:
+    """Ferme et recrée entièrement le navigateur Playwright"""
+    global _playwright_instance, _browser, _context, _consecutive_failures
+    log.warning("🔄 Reset navigateur Playwright...")
+    try:
+        if _context:
+            _context.close()
+        if _browser:
+            _browser.close()
+        if _playwright_instance:
+            _playwright_instance.stop()
+    except Exception as e:
+        log.warning(f"Erreur lors du reset: {e}")
+    finally:
+        _playwright_instance = None
+        _browser = None
+        _context = None
+        _consecutive_failures = 0
+    time.sleep(3)
+    get_browser_context()
+    log.info("✅ Navigateur recrée avec succès")
 
 
 def get_browser_context():
@@ -137,22 +162,27 @@ def get_browser_context():
 
 
 def fetch_page(url: str) -> str | None:
-    """Fetch page HTML via Playwright (contourne le 403 Buyee)"""
+    """Fetch page HTML via Playwright avec timeout strict et auto-reset"""
+    global _consecutive_failures
+
     for attempt in range(3):
         page = None
         try:
             ctx = get_browser_context()
             page = ctx.new_page()
-            page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-            page.wait_for_timeout(random.randint(1500, 3000))
+            page.goto(url, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT)
+            page.wait_for_timeout(random.randint(1000, 2000))
             html = page.content()
             log.info(f"HTML récupéré: {len(html)} caractères")
+            _consecutive_failures = 0  # reset compteur sur succes
             return html
         except PlaywrightTimeout:
-            log.warning(f"Timeout Playwright — attempt {attempt + 1}/3")
+            _consecutive_failures += 1
+            log.warning(f"Timeout Playwright ({_consecutive_failures}) — attempt {attempt + 1}/3")
             time.sleep(5)
         except Exception as e:
-            log.warning(f"Erreur Playwright: {e} — attempt {attempt + 1}/3")
+            _consecutive_failures += 1
+            log.warning(f"Erreur Playwright ({_consecutive_failures}): {e} — attempt {attempt + 1}/3")
             time.sleep(5)
         finally:
             if page:
@@ -160,6 +190,11 @@ def fetch_page(url: str) -> str | None:
                     page.close()
                 except Exception:
                     pass
+
+        # Reset navigateur si trop d'echecs consecutifs
+        if _consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+            reset_browser()
+
     return None
 
 
@@ -168,7 +203,6 @@ def fetch_page(url: str) -> str | None:
 # PARSE LISTINGS
 # ────────────────────────────────────────────
 def parse_listings(html: str, brand: str) -> list[dict]:
-    """Parse Mercari listings, filter excludes, extract item data"""
     soup = BeautifulSoup(html, "lxml")
     items = []
     seen_ids = set()
@@ -195,7 +229,6 @@ def parse_listings(html: str, brand: str) -> list[dict]:
             continue
         seen_ids.add(item_id)
 
-        # Image
         img_tag = a.find("img")
         image_url = ""
         if img_tag:
@@ -209,11 +242,9 @@ def parse_listings(html: str, brand: str) -> list[dict]:
             elif src and not src.startswith("data:"):
                 image_url = src
 
-        # Titre
         title_tag = a.find(["p", "h2"], class_=re.compile(r"name|txt"))
         title = title_tag.get_text(strip=True) if title_tag else ""
 
-        # Prix
         price_tag = a.find(["span", "p"], class_=re.compile(r"price"))
         price_text = price_tag.get_text(strip=True) if price_tag else ""
         price_jpy = 0
